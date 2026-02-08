@@ -5,6 +5,7 @@ from pydantic_ai import Agent
 
 from hr_breaker.config import get_model_settings, get_pro_model
 from hr_breaker.models import FilterResult, OptimizedResume, ResumeSource
+from hr_breaker.utils.retry import run_with_retry
 
 
 class HallucinationResult(BaseModel):
@@ -130,7 +131,7 @@ List any concerns but remember: light assumptions about related technologies are
 
     threshold = 0.6 if no_shame else 0.9
     agent = get_hallucination_agent(no_shame=no_shame)
-    result = await agent.run(prompt)
+    result = await run_with_retry(agent.run, prompt)
     r = result.output
 
     issues = []
