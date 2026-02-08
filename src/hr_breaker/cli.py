@@ -24,11 +24,11 @@ OUTPUT_DIR = Path("output")
 @cli.command()
 @click.argument("resume_path", type=click.Path(exists=True, path_type=Path))
 @click.argument("job_input")
-@click.option("--output", "-o", type=click.Path(path_type=Path), default=None)
-@click.option("--max-iterations", "-n", type=int, default=None)
-@click.option("--debug", "-d", is_flag=True, help="Save all iterations as PDFs to output/debug/")
-@click.option("--seq", "-s", is_flag=True, help="Run filters sequentially (default: parallel)")
-@click.option("--no-shame", is_flag=True, help="Lenient mode: allow aggressive content stretching")
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None, envvar="HR_BREAKER_OUTPUT")
+@click.option("--max-iterations", "-n", type=int, default=None, envvar="HR_BREAKER_MAX_ITERATIONS")
+@click.option("--debug", "-d", is_flag=True, help="Save all iterations as PDFs to output/debug/", envvar="HR_BREAKER_DEBUG")
+@click.option("--seq", "-s", is_flag=True, help="Run filters sequentially (default: parallel)", envvar="HR_BREAKER_SEQ")
+@click.option("--no-shame", is_flag=True, help="Lenient mode: allow aggressive content stretching", envvar="HR_BREAKER_NO_SHAME")
 def optimize(
     resume_path: Path,
     job_input: str,

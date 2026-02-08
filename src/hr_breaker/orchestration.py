@@ -133,7 +133,7 @@ async def optimize_for_job(
     """
     settings = get_settings()
 
-    logger.info("Starting optimisation with settings: %s", settings)
+    logger.info("Starting optimi`ation with settings: %s", settings)
 
     if max_iterations is None:
         max_iterations = settings.max_iterations
