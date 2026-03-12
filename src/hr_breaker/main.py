@@ -1,159 +1,116 @@
 import asyncio
-import subprocess
-import sys
+
 import nest_asyncio
 import streamlit as st
 
 nest_asyncio.apply()
 
-# Event loop setup
+# Event loop setup — must happen before any hr_breaker imports that touch asyncio
 if "event_loop" not in st.session_state:
     st.session_state.event_loop = asyncio.new_event_loop()
 asyncio.set_event_loop(st.session_state.event_loop)
 
 from hr_breaker.agents import extract_name, parse_job_posting
-from hr_breaker.config import get_settings
-from hr_breaker.models import GeneratedPDF, ResumeSource, ValidationResult, SUPPORTED_LANGUAGES, get_language
+from hr_breaker.config import (
+    get_embedding_llm_config,
+    get_flash_llm_config,
+    get_pro_llm_config,
+    get_settings,
+)
+from hr_breaker.models import GeneratedPDF, RankedProfileDocument, ResumeSource
+from hr_breaker.models.profile import document_needs_extraction
 from hr_breaker.orchestration import optimize_for_job
+from hr_breaker.runtime_status import emit_runtime_message
 from hr_breaker.services import (
-    PDFStorage,
-    ResumeCache,
-    scrape_job_posting,
     CloudflareBlockedError,
+    PDFStorage,
+    ProfileStore,
+    ResumeCache,
+    extraction_worker,
+    scrape_job_posting,
 )
 from hr_breaker.services.pdf_storage import generate_run_id
-from hr_breaker.services.pdf_parser import load_resume_content_from_upload
+from hr_breaker.services.profile_retrieval import rank_profile_documents, synthesize_profile_resume_source
+from hr_breaker.ui.results_panel import display_filter_results, render_results_panel
+from hr_breaker.ui.runtime_log import (
+    append_runtime_event,
+    capture_runtime_output,
+    initialize_runtime_state,
+    render_runtime_panel,
+    reset_runtime_state,
+)
+from hr_breaker.ui.sidebar import (
+    cached_provider_catalog,
+    initialize_llm_sidebar_state,
+    initialize_ui_sidebar_state,
+    render_sidebar,
+)
+from hr_breaker.ui.source_panel import (
+    _optional_text,
+    combine_instructions,
+    get_active_profile,
+    infer_profile_name_parts,
+    initialize_profile_state,
+    render_direct_resume_panel,
+    render_profile_panel,
+    sync_profile_name_draft,
+    sync_profile_selection,
+)
 
 # Initialize services
 cache = ResumeCache()
 pdf_storage = PDFStorage()
-settings = get_settings()
+profile_store = ProfileStore()
 
 st.set_page_config(page_title="HR-Breaker", page_icon="*", layout="wide")
 
 
 def run_async(coro):
-    """Run async coroutine in sync context."""
     loop = st.session_state.event_loop
     return loop.run_until_complete(coro)
 
 
 @st.cache_data(show_spinner=False)
 def cached_scrape_job(url: str) -> str:
-    """Cached job scraping by URL."""
     return scrape_job_posting(url)
 
 
 @st.cache_data(show_spinner=False)
 def cached_extract_name(content: str) -> tuple[str | None, str | None]:
-    """Cached name extraction by resume content hash."""
     return run_async(extract_name(content))
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def cached_parse_job(text: str):
-    """Cached job parsing by job text hash."""
     return run_async(parse_job_posting(text))
 
 
-def display_filter_results(validation: ValidationResult):
-    """Display filter results in UI."""
-    for result in validation.results:
-        if result.skipped:
-            continue
-        icon = "[OK]" if result.passed else "[X]"
-        with st.expander(
-            f"{icon} {result.filter_name} - Score: {result.score:.2f}/{result.threshold:.2f}"
-        ):
-            if result.issues:
-                st.write("**Issues:**")
-                for issue in result.issues:
-                    st.write(f"- {issue}")
-            if result.suggestions:
-                st.write("**Suggestions:**")
-                for suggestion in result.suggestions:
-                    st.write(f"- {suggestion}")
+# --- App initialization ---
 
+initialize_llm_sidebar_state()
+initialize_ui_sidebar_state()
+initialize_runtime_state()
+settings = get_settings()
+profiles = profile_store.list_profiles()
+initialize_profile_state(profiles)
 
-# Sidebar - Options & History
-with st.sidebar:
-    # Options section
-    st.markdown("**Options**")
-    sequential_mode = st.checkbox(
-        "Sequential", value=False, help="Run filters sequentially with early exit"
-    )
-    debug_mode = st.checkbox("Debug", value=True, help="Save each iteration PDF")
-    no_shame_mode = st.checkbox(
-        "No Shame",
-        value=False,
-        help="Lenient mode: allow aggressive content stretching",
-    )
+# --- Sidebar ---
 
-    # Language selector
-    _lang_options = [lang.code for lang in SUPPORTED_LANGUAGES]
-    _lang_labels = {lang.code: lang.native_name for lang in SUPPORTED_LANGUAGES}
-    _default_lang_idx = (
-        _lang_options.index(settings.default_language)
-        if settings.default_language in _lang_options
-        else 0
-    )
-    selected_lang_code = st.selectbox(
-        "Resume language",
-        options=_lang_options,
-        index=_default_lang_idx,
-        format_func=lambda code: _lang_labels[code],
-        help="Output language for the resume. Generated directly in this language.",
-    )
-    selected_language = get_language(selected_lang_code)
+active_profile, sequential_mode, debug_mode, no_shame_mode, selected_lang_code, selected_language, max_iterations = render_sidebar(
+    profiles=profiles,
+    profile_store=profile_store,
+    pdf_storage=pdf_storage,
+    sync_profile_selection=sync_profile_selection,
+    sync_profile_name_draft=sync_profile_name_draft,
+    infer_profile_name_parts=infer_profile_name_parts,
+    _optional_text=_optional_text,
+)
 
-    max_iterations = st.number_input(
-        "Max iterations", min_value=1, max_value=10, value=settings.max_iterations
-    )
+# --- Main content ---
 
-    st.divider()
-
-    # History section
-    existing_pdfs = pdf_storage.list_all()  # Always scans folder
-    st.markdown(f"**History ({len(existing_pdfs)})**")
-    col_open, col_refresh = st.columns(2)
-    with col_open:
-        if st.button("📂 Open", use_container_width=True, help="Open output folder"):
-            folder = str(settings.output_dir.resolve())
-            if sys.platform == "darwin":
-                subprocess.run(["open", folder])
-            elif sys.platform == "win32":
-                subprocess.run(["explorer", folder])
-            else:
-                subprocess.run(["xdg-open", folder])
-    with col_refresh:
-        if st.button("🔄 Refresh", use_container_width=True, help="Rescan folder"):
-            st.rerun()
-
-    if existing_pdfs:
-        for pdf in existing_pdfs[:10]:  # Already sorted newest-first
-            label = f"{pdf.company} • {pdf.job_title}"
-            if len(label) > 30:
-                label = label[:27] + "..."
-            with open(pdf.path, "rb") as f:
-                st.download_button(
-                    label,
-                    f.read(),
-                    file_name=pdf.path.name,
-                    mime="application/pdf",
-                    key=str(pdf.timestamp),
-                    help=f"{pdf.company} • {pdf.job_title}\n{pdf.timestamp.strftime('%m/%d %H:%M')}",
-                    use_container_width=True,
-                )
-    else:
-        st.caption("No PDFs yet")
-
-    st.divider()
-    st.text(f"Models\nPro: {settings.pro_model}\nFlash: {settings.flash_model}")
-
-# Main content
 st.markdown("### HR-Breaker")
 
-# Use cached resume if available (but not if user explicitly cleared it)
+# Restore cached resume if available and not explicitly cleared
 if (
     "source_resume" not in st.session_state
     and not st.session_state.get("resume_cleared")
@@ -165,96 +122,50 @@ if (
         if cached_resumes[-1].instructions:
             st.session_state["user_instructions"] = cached_resumes[-1].instructions
 
-# Two main columns: Resume | Job
-col_resume, col_job = st.columns(2)
+job_text = st.session_state.get("job_text", "")
+has_job = bool(job_text)
+job_header = "**Job Posting ✓**" if has_job else "**Job Posting**"
 
-has_resume = "source_resume" in st.session_state
+col_resume, col_job = st.columns(2)
+active_profile = get_active_profile(profiles)
+direct_source = st.session_state.get("source_resume")
+active_profile_documents = []
+selected_profile_documents = []
 
 with col_resume:
-    resume_header = "**Resume ✓**" if has_resume else "**Resume**"
-    st.markdown(resume_header)
-
-    # If resume loaded, show compact info; else show input
-    if has_resume:
-        src = st.session_state["source_resume"]
-        name = f"{src.first_name or ''} {src.last_name or ''}".strip() or "Unknown"
-        c1, c2 = st.columns([4, 1])
-        with c1:
-            st.success(f"✓ {name}")
-        with c2:
-            if st.button("Change", key="clear_resume"):
-                st.session_state.pop("source_resume", None)
-                st.session_state.pop("last_result", None)
-                st.session_state["resume_uploader_key"] = (
-                    st.session_state.get("resume_uploader_key", 0) + 1
-                )
-                st.session_state["resume_cleared"] = True
-                st.rerun()
-        with st.expander("Preview", expanded=False):
-            st.text(src.content)
-    else:
-        resume_method = st.radio(
-            "Resume input method",
-            ["Upload", "Paste"],
+    st.markdown("**Source mode**")
+    if profiles:
+        st.radio(
+            "Source mode",
+            ["Profile archive", "Direct upload"],
             horizontal=True,
-            key="resume_method",
+            key="source_mode",
+            help="Profiles are reusable archive folders. Direct upload keeps the one-off workflow.",
             label_visibility="collapsed",
         )
+    else:
+        st.session_state["source_mode"] = "Direct upload"
 
-        resume_content = None
-        if resume_method == "Upload":
-            uploader_key = (
-                f"resume_uploader_{st.session_state.get('resume_uploader_key', 0)}"
-            )
-            uploaded_file = st.file_uploader(
-                "Upload (.tex, .md, .txt, .pdf)",
-                type=["tex", "md", "txt", "pdf"],
-                label_visibility="collapsed",
-                key=uploader_key,
-            )
-            if uploaded_file:
-                resume_content = load_resume_content_from_upload(
-                    uploaded_file.name, uploaded_file.read()
-                )
-        else:
-            pasted_resume = st.text_area(
-                "Paste resume",
-                height=100,
-                label_visibility="collapsed",
-                placeholder="Paste resume text...",
-            )
-            if pasted_resume:
-                resume_content = pasted_resume
-
-        if resume_content:
-            with st.spinner("Extracting name..."):
-                first_name, last_name = cached_extract_name(resume_content)
-            source = ResumeSource(
-                content=resume_content, first_name=first_name, last_name=last_name
-            )
-            cache.put(source)
-            st.session_state["source_resume"] = source
-            st.session_state.pop("resume_cleared", None)
-            st.rerun()
+    if st.session_state["source_mode"] == "Profile archive":
+        active_profile, active_profile_documents, selected_profile_documents = render_profile_panel(
+            active_profile, profile_store, extraction_worker
+        )
+    else:
+        direct_source = render_direct_resume_panel(cache, cached_extract_name)
 
 with col_job:
-    job_text = st.session_state.get("job_text", "")
-    has_job = bool(job_text)
-    job_header = "**Job Posting ✓**" if has_job else "**Job Posting**"
     st.markdown(job_header)
-
-    # If job loaded, show compact info; else show input
     if has_job:
         preview = (
             job_text[:80].replace("\n", " ") + "..."
             if len(job_text) > 80
             else job_text.replace("\n", " ")
         )
-        c1, c2 = st.columns([4, 1])
+        c1, c2 = st.columns([5, 1.4])
         with c1:
             st.success(f"✓ {preview}")
         with c2:
-            if st.button("Change", key="clear_job"):
+            if st.button("Change", key="clear_job", use_container_width=True):
                 st.session_state.pop("job_text", None)
                 st.session_state.pop("last_job_url", None)
                 st.session_state.pop("last_result", None)
@@ -274,8 +185,6 @@ with col_job:
             job_url = st.text_input(
                 "Job URL", label_visibility="collapsed", placeholder="https://..."
             )
-
-            # Auto-fetch when URL changes
             if job_url and job_url != st.session_state.get("last_job_url"):
                 st.session_state["last_job_url"] = job_url
                 with st.spinner("Fetching..."):
@@ -291,9 +200,7 @@ with col_job:
                         st.error(f"Failed: {e}")
 
             if st.session_state.get("scrape_failed_url"):
-                st.markdown(
-                    f"[Open in browser]({st.session_state['scrape_failed_url']})"
-                )
+                st.markdown(f"[Open in browser]({st.session_state['scrape_failed_url']})")
         else:
             pasted_job = st.text_area(
                 "Paste job",
@@ -306,190 +213,236 @@ with col_job:
                 st.session_state.pop("scrape_failed_url", None)
                 st.rerun()
 
-# User instructions
-if "user_instructions" not in st.session_state:
-    st.session_state["user_instructions"] = ""
-user_instructions = st.text_area(
-    "Instructions (optional)",
-    placeholder="E.g. Focus on Python and AWS experience, add my Kubernetes certification...",
-    help="Instructions for the optimizer: extra experience, style preferences, emphasis areas.",
-    key="user_instructions",
-)
+    if "user_instructions" not in st.session_state:
+        st.session_state["user_instructions"] = ""
+    instructions_expanded = bool(st.session_state.get("user_instructions"))
+    with st.expander("Instructions (optional)", expanded=instructions_expanded):
+        user_instructions = st.text_area(
+            "Instructions (optional)",
+            placeholder="E.g. Focus on Python and AWS experience, add my Kubernetes certification...",
+            help="Instructions for the optimizer: extra experience, style preferences, emphasis areas.",
+            key="user_instructions",
+            label_visibility="collapsed",
+        )
 
-# Optimize button
+# --- Optimize button ---
+
+is_profile_mode = st.session_state["source_mode"] == "Profile archive"
+has_source = bool(selected_profile_documents) if is_profile_mode else direct_source is not None
 is_running = st.session_state.get("optimization_running", False)
-can_optimize = has_resume and has_job and not is_running
+can_optimize = has_source and has_job and not is_running
 btn_help = None
-if not has_resume:
-    btn_help = "Need resume"
+if is_profile_mode and active_profile is None:
+    btn_help = "Need active profile"
+elif not has_source:
+    btn_help = "Need selected profile documents" if is_profile_mode else "Need resume"
 elif not has_job:
     btn_help = "Need job posting"
 elif is_running:
     btn_help = "Optimization in progress"
 clicked = st.button(
-    "🚀 Optimize", disabled=not can_optimize, use_container_width=True, help=btn_help
+    "🚀 Optimize",
+    disabled=not can_optimize,
+    use_container_width=True,
+    help=btn_help,
 )
+runtime_panel = st.empty()
+render_runtime_panel(runtime_panel)
+
+# Drain background extraction events into runtime panel on every rerun
+_drained_events = extraction_worker.drain_events()
+if _drained_events:
+    for _event in _drained_events:
+        append_runtime_event(_event)
+    render_runtime_panel(runtime_panel)
+
+# --- Optimization flow ---
 
 if clicked:
     st.session_state["run_id"] = generate_run_id()
-    source = st.session_state["source_resume"]
-    # Persist instructions to cache
-    instructions_value = user_instructions.strip() if user_instructions else None
-    if instructions_value != source.instructions:
-        source = source.model_copy(update={"instructions": instructions_value})
-        cache.put(source)
-        st.session_state["source_resume"] = source
+    session_instructions = _optional_text(user_instructions)
+    optimizer_instructions = combine_instructions(
+        active_profile.instructions if is_profile_mode and active_profile else None,
+        session_instructions,
+    )
+    source = direct_source
+    preflight = None
+
+    if not is_profile_mode:
+        if source is None:
+            raise ValueError("No resume loaded")
+        if session_instructions != source.instructions:
+            source = source.model_copy(update={"instructions": session_instructions})
+            cache.put(source)
+            st.session_state["source_resume"] = source
+
+    reset_runtime_state()
+    render_runtime_panel(runtime_panel)
     st.session_state["optimization_running"] = True
     error_occurred = None
 
     try:
-        with st.spinner("Parsing job posting..."):
-            job = cached_parse_job(job_text)
-
-        # Setup debug dir if enabled
-        debug_dir = None
-        if debug_mode:
-            debug_dir = pdf_storage.generate_debug_dir(
-                job.company, job.title, run_id=st.session_state["run_id"]
+        with capture_runtime_output(runtime_panel):
+            pro_config = get_pro_llm_config()
+            flash_config = get_flash_llm_config()
+            embedding_config = get_embedding_llm_config()
+            emit_runtime_message(
+                f"Pro model: {pro_config.model_name} | endpoint: {pro_config.api_base or 'provider default'}"
             )
+            emit_runtime_message(
+                f"Flash model: {flash_config.model_name} | endpoint: {flash_config.api_base or 'provider default'}"
+            )
+            emit_runtime_message(
+                f"Embedding model: {embedding_config.model_name} | endpoint: {embedding_config.api_base or 'provider default'}"
+            )
+            emit_runtime_message("Parsing job posting...")
+            with st.spinner("Parsing job posting..."):
+                job = cached_parse_job(job_text)
+            emit_runtime_message(f"Parsed job posting for {job.title} at {job.company}")
 
-        # Store iteration results for session state
-        iteration_results = []
-
-        with st.status("Optimizing resume...", expanded=True) as status_container:
-
-            def on_iteration(i, opt, val):
-                iteration_results.append((i, opt, val))
-                status_container.update(label=f"Iteration {i + 1}/{max_iterations}")
-                status_container.write(f"Iteration {i + 1} complete")
-
-                # Save debug files if enabled
-                if debug_mode and debug_dir:
-                    if opt.html:
-                        (debug_dir / f"iteration_{i + 1}.html").write_text(opt.html, encoding="utf-8")
-                    if opt.pdf_bytes:
-                        (debug_dir / f"iteration_{i + 1}.pdf").write_bytes(
-                            opt.pdf_bytes
-                        )
-
-            # Only pass language if not English (no translation needed)
-            target_lang = selected_language if selected_language.code != "en" else None
-
-            optimized, validation, job = run_async(
-                optimize_for_job(
-                    source,
-                    job_text,
-                    max_iterations=max_iterations,
-                    on_iteration=on_iteration,
-                    job=job,
-                    parallel=not sequential_mode,
-                    no_shame=no_shame_mode,
-                    user_instructions=instructions_value,
-                    language=target_lang,
+            debug_dir = None
+            if debug_mode:
+                debug_dir = pdf_storage.generate_debug_dir(
+                    job.company, job.title, run_id=st.session_state["run_id"]
                 )
-            )
-            status_container.update(label="Optimization complete", state="complete")
+                emit_runtime_message(f"Debug output enabled: {debug_dir}")
 
-        # Save PDF and store results in session state
-        pdf_path = None
-        if optimized and optimized.pdf_bytes:
-            pdf_path = pdf_storage.generate_path(
-                source.first_name, source.last_name, job.company, job.title,
-                lang_code=selected_lang_code,
-                run_id=st.session_state["run_id"],
-            )
-            pdf_path.parent.mkdir(parents=True, exist_ok=True)
-            pdf_path.write_bytes(optimized.pdf_bytes)
+            iteration_results = []
+            ranked_documents: list[RankedProfileDocument] = []
 
-            pdf_record = GeneratedPDF(
-                path=pdf_path,
-                source_checksum=source.checksum,
-                company=job.company,
-                job_title=job.title,
-                first_name=source.first_name,
-                last_name=source.last_name,
-            )
-            pdf_storage.save_record(pdf_record)
+            with st.status("Optimizing resume...", expanded=True) as status_container:
+                if is_profile_mode:
+                    if active_profile is None:
+                        raise ValueError("No active profile selected")
+                    selected_count = len(selected_profile_documents)
+                    status_container.write(
+                        f"Profile preflight: {selected_count} selected archive documents"
+                    )
+                    emit_runtime_message(
+                        f"Profile preflight: {selected_count} selected archive documents"
+                    )
+                    _n_with = sum(1 for d in selected_profile_documents if not document_needs_extraction(d))
+                    _n_total = len(selected_profile_documents)
 
-        # Store in session state for persistent display
-        st.session_state["last_result"] = {
-            "optimized": optimized,
-            "validation": validation,
-            "job": job,
-            "iterations": iteration_results,
-            "pdf_path": pdf_path,
-            "debug_dir": debug_dir,
-        }
+                    status_container.update(label="Ranking archive evidence...")
+                    emit_runtime_message("Ranking archive evidence...")
+                    ranked_documents = run_async(
+                        rank_profile_documents(selected_profile_documents, job)
+                    )
+
+                    if _n_with > 0:
+                        _pending_note = f", {_n_total - _n_with} pending" if _n_with < _n_total else ""
+                        emit_runtime_message(f"Synthesis: extraction path — {_n_with}/{_n_total} docs{_pending_note}")
+                    else:
+                        emit_runtime_message("Synthesis: whole-doc fallback")
+
+                    status_container.update(label="Synthesizing profile source...")
+                    source = synthesize_profile_resume_source(
+                        active_profile,
+                        selected_profile_documents,
+                        ranked_documents,
+                    )
+                    if optimizer_instructions != source.instructions:
+                        source = source.model_copy(update={"instructions": optimizer_instructions})
+                    status_container.write(f"Synthesized source length: {len(source.content)} chars")
+                    emit_runtime_message(f"Synthesized profile source: {len(source.content)} chars")
+                    if _n_with == 0:
+                        for match in ranked_documents:
+                            emit_runtime_message(
+                                f"  Included {match.document.title} [{match.document.kind}] score={match.score:.2f}"
+                            )
+                    preflight = {
+                        "selected_count": len(selected_profile_documents),
+                        "ranked_documents": ranked_documents,
+                        "synthesized_chars": len(source.content),
+                        "profile_id": active_profile.id,
+                    }
+                elif source is None:
+                    raise ValueError("No resume loaded")
+
+                def on_iteration(i, opt, val):
+                    iteration_results.append((i, opt, val))
+                    status_container.update(label=f"Iteration {i + 1}/{max_iterations}")
+                    status_container.write(f"Iteration {i + 1} complete")
+                    emit_runtime_message(f"Iteration {i + 1}/{max_iterations} complete")
+
+                    if debug_mode and debug_dir:
+                        if opt.html:
+                            (debug_dir / f"iteration_{i + 1}.html").write_text(opt.html, encoding="utf-8")
+                        if opt.pdf_bytes:
+                            (debug_dir / f"iteration_{i + 1}.pdf").write_bytes(opt.pdf_bytes)
+
+                target_lang = selected_language if selected_language.code != "en" else None
+                status_container.update(label=f"Generating iteration 1/{max_iterations}...")
+                emit_runtime_message(f"Starting optimizer loop ({max_iterations} iterations max)")
+
+                optimized, validation, job = run_async(
+                    optimize_for_job(
+                        source,
+                        job_text,
+                        max_iterations=max_iterations,
+                        on_iteration=on_iteration,
+                        job=job,
+                        parallel=not sequential_mode,
+                        no_shame=no_shame_mode,
+                        user_instructions=optimizer_instructions,
+                        language=target_lang,
+                    )
+                )
+                status_container.update(label="Optimization complete", state="complete")
+                emit_runtime_message("Optimization complete")
+
+            pdf_path = None
+            if optimized and optimized.pdf_bytes:
+                pdf_path = pdf_storage.generate_path(
+                    source.first_name, source.last_name, job.company, job.title,
+                    lang_code=selected_lang_code,
+                    run_id=st.session_state["run_id"],
+                )
+                pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                pdf_path.write_bytes(optimized.pdf_bytes)
+
+                pdf_record = GeneratedPDF(
+                    path=pdf_path,
+                    source_checksum=source.checksum,
+                    company=job.company,
+                    job_title=job.title,
+                    first_name=source.first_name,
+                    last_name=source.last_name,
+                )
+                pdf_storage.save_record(pdf_record)
+                emit_runtime_message(f"Saved PDF: {pdf_path}")
+
+            st.session_state["last_result"] = {
+                "optimized": optimized,
+                "validation": validation,
+                "job": job,
+                "iterations": iteration_results,
+                "pdf_path": pdf_path,
+                "debug_dir": debug_dir,
+                "source": source,
+                "preflight": preflight,
+            }
     except Exception as e:
         error_occurred = e
+        append_runtime_event(f"{type(e).__name__}: {e}", kind="error")
+        render_runtime_panel(runtime_panel)
     finally:
         st.session_state["optimization_running"] = False
 
     if error_occurred:
         st.error(f"Optimization failed: {error_occurred}")
     else:
-        st.rerun()  # Rerun to show results and update history
-
-# Display last result if exists
-if "last_result" in st.session_state:
-    result = st.session_state["last_result"]
-    optimized = result["optimized"]
-    validation = result["validation"]
-    job = result["job"]
-    iterations = result["iterations"]
-    pdf_path = result["pdf_path"]
-    debug_dir = result["debug_dir"]
-
-    # Result section
-    st.markdown("---")
-    st.markdown(f"### Result: {job.title} at {job.company}")
-
-    # Status message
-    if validation.passed:
-        st.success("All filters passed!")
-    else:
-        active = [r for r in validation.results if not r.skipped]
-        passed = [r.filter_name for r in active if r.passed]
-        failed = [r.filter_name for r in active if not r.passed]
-        st.warning(
-            f"Max iterations ({len(passed)}/{len(active)} passed). Failed: {', '.join(failed)}"
-        )
-
-    if debug_dir:
-        st.info(f"Debug output: {debug_dir}")
-
-    # PDF actions
-    if pdf_path:
-        st.success(f"PDF saved: {pdf_path}")
-        if st.button("📂 Open Output Folder", use_container_width=True):
-            folder = str(pdf_path.parent.resolve())
-            if sys.platform == "darwin":
-                subprocess.run(["open", folder])
-            elif sys.platform == "win32":
-                subprocess.run(["explorer", folder])
-            else:
-                subprocess.run(["xdg-open", folder])
-    elif optimized:
-        st.error("Failed to render PDF")
-
-    # Resume content preview
-    if optimized:
-        with st.expander("Resume Content", expanded=False):
-            if optimized.html:
-                st.code(optimized.html, language="html")
-            elif optimized.data:
-                st.json(optimized.data.model_dump())
-
-    # Iteration details
-    for i, opt, val in iterations:
-        with st.expander(f"Iteration {i + 1}", expanded=False):
-            if opt.changes:
-                st.write("**Changes:**")
-                for change in opt.changes:
-                    st.write(f"- {change}")
-            display_filter_results(val)
-
-    # Clear button
-    if st.button("Clear Result", use_container_width=True):
-        st.session_state.pop("last_result", None)
         st.rerun()
+
+# --- Results ---
+
+if "last_result" in st.session_state:
+    render_results_panel(st.session_state["last_result"], run_async, pdf_storage)
+
+# --- Auto-refresh while background extraction is active ---
+
+if extraction_worker.any_active():
+    import time
+    time.sleep(1.5)
+    st.rerun()
