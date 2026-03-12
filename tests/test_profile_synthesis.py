@@ -82,6 +82,17 @@ def test_fallback_top1_when_all_over_budget():
     assert "x" * 100 in source.content  # top-1 included regardless
 
 
+def test_fallback_uses_last_name_without_duplication():
+    profile = _make_profile(first_name=None, last_name="Doe", display_name="Candidate")
+    doc = _make_doc(content="Built Python ML systems.")
+    source = synthesize_profile_resume_source(profile, [doc], [_ranked(doc)])
+
+    assert source.first_name is None
+    assert source.last_name == "Doe"
+    assert source.contact_info is not None
+    assert source.contact_info.name == "Doe"
+
+
 # --- Extraction path ---
 
 def _extraction(**kwargs):

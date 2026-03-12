@@ -307,13 +307,20 @@ def split_full_name(name: str | None) -> tuple[str | None, str | None]:
 
 def resolve_profile_name_parts(
     profile: Profile, *, extracted_name: str | None
-) -> tuple[str | None, str | None, str | None]:
+ ) -> tuple[str | None, str | None, str | None]:
     extracted_first, extracted_last = split_full_name(extracted_name)
-    full_first, full_last = split_full_name(profile.full_name)
     display_first, display_last = split_full_name(profile.display_name)
 
-    first_name = profile.first_name or extracted_first or full_first or display_first
-    last_name = profile.last_name or extracted_last or full_last or display_last
+    first_name = profile.first_name or extracted_first
+    last_name = profile.last_name or extracted_last
+
+    if not first_name and not last_name:
+        first_name, last_name = display_first, display_last
+    elif not first_name and display_last and display_last == last_name:
+        first_name = display_first
+    elif not last_name and display_first and display_first == first_name:
+        last_name = display_last
+
     best_name = " ".join(part for part in [first_name, last_name] if part) or None
     return first_name, last_name, best_name
 

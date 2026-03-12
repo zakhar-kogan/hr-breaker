@@ -22,8 +22,31 @@ from hr_breaker.services import (
     CloudflareBlockedError,
 )
 from hr_breaker.services.pdf_storage import generate_run_id
-from hr_breaker.models.profile import document_needs_extraction
+from hr_breaker.models.profile import document_needs_extraction, get_document_extraction
 from hr_breaker.services.pdf_parser import load_resume_content
+
+
+def _format_extraction_state(doc) -> str:
+    status = str(doc.metadata.get("extraction_status") or "").lower()
+    if status == "empty":
+        return "empty extraction"
+    if status == "failed":
+        return "failed extraction"
+    if get_document_extraction(doc) is not None:
+        return "extracted"
+    return "no extraction"
+
+
+def _print_extraction_result(doc) -> str:
+    status = str(doc.metadata.get("extraction_status") or "").lower()
+    if status == "done":
+        click.echo(" ok")
+        return "done"
+    if status == "empty":
+        click.echo(" empty")
+        return "empty"
+    click.echo(f" unexpected status: {status or 'missing'}")
+    return "unexpected"
 
 
 @click.group()
@@ -102,9 +125,9 @@ def profile_show(profile_id: str):
     if not docs:
         click.echo("  (none — add with: hr-breaker profile add <profile-id> <file>)")
     for doc in docs:
-        extracted = "extracted" if "extraction" in doc.metadata else "no extraction"
+        extraction_state = _format_extraction_state(doc)
         incl = "+" if doc.included_by_default else "-"
-        click.echo(f"  [{incl}] {doc.id[:12]}  {doc.title:40s}  [{doc.kind}, {extracted}]")
+        click.echo(f"  [{incl}] {doc.id[:12]}  {doc.title:40s}  [{doc.kind}, {extraction_state}]")
 
 
 @profile.command("add")
@@ -147,8 +170,11 @@ def profile_add(profile_id: str, files: tuple[Path, ...], extract: bool, exclude
             for doc_id in added_ids:
                 click.echo(f"  {doc_id[:12]}...", nl=False)
                 try:
-                    await store.extract_document_content(profile_id, doc_id)
-                    click.echo(" ok")
+                    updated = await store.extract_document_content(profile_id, doc_id)
+                    if updated is None:
+                        click.echo(" missing")
+                        continue
+                    _print_extraction_result(updated)
                 except Exception as exc:
                     click.echo(f" failed: {exc}")
 
@@ -453,10 +479,10 @@ def backfill(profile_id: str | None, force: bool):
         click.echo("No profiles found.")
         return
 
-    total = done = failed = 0
+    total = done = empty = failed = 0
 
     async def run():
-        nonlocal total, done, failed
+        nonlocal total, done, empty, failed
         for p in profiles:
             docs = store.list_documents(p.id)
             pending = [d for d in docs if force or document_needs_extraction(d)]
@@ -465,15 +491,24 @@ def backfill(profile_id: str | None, force: bool):
                 total += 1
                 click.echo(f"  {doc.title}...", nl=False)
                 try:
-                    await store.extract_document_content(p.id, doc.id)
-                    done += 1
-                    click.echo(" ok")
+                    updated = await store.extract_document_content(p.id, doc.id)
+                    if updated is None:
+                        failed += 1
+                        click.echo(" failed: document disappeared")
+                        continue
+                    result = _print_extraction_result(updated)
+                    if result == "done":
+                        done += 1
+                    elif result == "empty":
+                        empty += 1
+                    else:
+                        failed += 1
                 except Exception as exc:
                     failed += 1
                     click.echo(f" failed: {exc}")
 
     asyncio.run(run())
-    click.echo(f"\nDone: {done} extracted, {failed} failed, {total} total")
+    click.echo(f"\nDone: {done} extracted, {empty} empty, {failed} failed, {total} total")
 
 
 # ---------------------------------------------------------------------------
