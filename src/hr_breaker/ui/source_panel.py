@@ -5,6 +5,7 @@ import time
 import streamlit as st
 
 from hr_breaker.models import Profile, ProfileDocument, ResumeSource
+from hr_breaker.models.profile import document_needs_extraction
 from hr_breaker.services.pdf_parser import load_resume_content_from_upload
 
 
@@ -368,13 +369,7 @@ def render_profile_panel(
             st.caption("No archive documents yet. Add files, import a folder, or save a note above.")
             return refreshed_profile, documents, []
 
-        def _needs_extraction(doc) -> bool:
-            raw = doc.metadata.get("extraction")
-            if not raw:
-                return True
-            return "personal_info" not in raw
-
-        pending_extraction = [d for d in documents if _needs_extraction(d)]
+        pending_extraction = [d for d in documents if document_needs_extraction(d)]
         if pending_extraction:
             _btn_col, _rebtn_col = st.columns([3, 1])
             with _btn_col:

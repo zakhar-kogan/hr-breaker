@@ -68,9 +68,8 @@ class ExtractionWorker:
             # this doc will fall back to raw-text inclusion in synthesis.
             updated_doc = store.get_document(profile_id, doc_id)
             if updated_doc is not None:
-                from hr_breaker.models.profile import get_document_extraction, extraction_has_signal
-                ext = get_document_extraction(updated_doc)
-                if ext is not None and not extraction_has_signal(ext):
+                status = str(updated_doc.metadata.get("extraction_status") or "").lower()
+                if status == "empty":
                     logger.warning("Extraction for '%s' produced no usable content", label)
                     self.event_queue.put(RuntimeEvent(kind="warning", message=f"Extraction empty (no content found): {label}"))
             with self._lock:
