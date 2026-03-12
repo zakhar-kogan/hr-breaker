@@ -3,7 +3,7 @@
 import pytest
 
 from hr_breaker.filters import DataValidator, FilterRegistry
-from hr_breaker.filters.data_validator import validate_resume_data
+from hr_breaker.filters.data_validator import validate_html, validate_resume_data
 from hr_breaker.models import JobPosting, OptimizedResume, ResumeSource
 from hr_breaker.models.resume_data import (
     ResumeData,
@@ -68,6 +68,15 @@ def test_data_validator_priority():
 def test_data_validator_threshold():
     validator = DataValidator()
     assert validator.threshold == 1.0
+
+
+def test_validate_html_allows_missing_header_when_external():
+    valid, issues = validate_html(
+        '<section class="section"><h2 class="section-title">Summary</h2></section>',
+        require_header=False,
+    )
+    assert valid
+    assert issues == []
 
 
 # --- validate_resume_data Function Tests ---

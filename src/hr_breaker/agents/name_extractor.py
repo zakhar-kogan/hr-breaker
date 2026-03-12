@@ -1,7 +1,8 @@
 from pydantic import BaseModel
 from pydantic_ai import Agent
 
-from hr_breaker.config import get_flash_model, get_model_settings, get_settings
+from hr_breaker.config import get_flash_llm_config, get_flash_model, get_model_settings, get_settings
+from hr_breaker.runtime_status import emit_usage_event
 from hr_breaker.utils.retry import run_with_retry
 
 
@@ -34,4 +35,5 @@ async def extract_name(content: str) -> tuple[str | None, str | None]:
     # Only send first N chars - name should be at the top
     snippet = content[:settings.agent_name_extractor_chars]
     result = await run_with_retry(agent.run, f"Extract the name from this resume:\n\n{snippet}")
+    emit_usage_event("name_extractor", result, model_name=get_flash_llm_config().model_name)
     return result.output.first_name, result.output.last_name

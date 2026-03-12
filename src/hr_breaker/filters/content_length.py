@@ -7,7 +7,6 @@ from hr_breaker.filters.base import BaseFilter
 from hr_breaker.filters.registry import FilterRegistry
 from hr_breaker.models import FilterResult, JobPosting, OptimizedResume, ResumeSource
 from hr_breaker.models.language import Language
-from hr_breaker.services.length_estimator import estimate_content_length
 from hr_breaker.services.renderer import get_renderer, RenderError
 
 
@@ -55,20 +54,24 @@ class ContentLengthChecker(BaseFilter):
                 suggestions=[],
             )
 
-        try:
-            renderer = get_renderer()
-            render_result = renderer.render(optimized.html)
-            page_count = render_result.page_count
-            pdf_bytes = render_result.pdf_bytes
-        except RenderError as e:
-            return FilterResult(
-                filter_name=self.name,
-                passed=False,
-                score=0.0,
-                threshold=self.threshold,
-                issues=[f"Rendering failed: {str(e)}"],
-                suggestions=["Fix HTML content to allow rendering"],
-            )
+        if optimized.pdf_bytes is not None and optimized.page_count is not None:
+            page_count = optimized.page_count
+            pdf_bytes = optimized.pdf_bytes
+        else:
+            try:
+                renderer = get_renderer()
+                render_result = renderer.render(optimized.html, contact_info=source.contact_info)
+                page_count = render_result.page_count
+                pdf_bytes = render_result.pdf_bytes
+            except RenderError as e:
+                return FilterResult(
+                    filter_name=self.name,
+                    passed=False,
+                    score=0.0,
+                    threshold=self.threshold,
+                    issues=[f"Rendering failed: {str(e)}"],
+                    suggestions=["Fix HTML content to allow rendering"],
+                )
 
         if page_count > 2:
             return FilterResult(

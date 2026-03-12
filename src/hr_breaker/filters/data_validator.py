@@ -8,15 +8,16 @@ from hr_breaker.models import FilterResult, JobPosting, OptimizedResume, ResumeS
 from hr_breaker.models.language import Language
 
 
-def validate_html(html: str) -> tuple[bool, list[str]]:
+def validate_html(html: str, *, require_header: bool = True) -> tuple[bool, list[str]]:
     """Check HTML body content for validity."""
     issues = []
 
-    # Must have header with name
-    if not re.search(r'<header[^>]*class="header"', html):
-        issues.append("Missing header element with class='header'")
-    elif not re.search(r'<h1[^>]*class="name"[^>]*>', html):
-        issues.append("Missing name (h1 with class='name') in header")
+    if require_header:
+        # Must have header with name
+        if not re.search(r'<header[^>]*class="header"', html):
+            issues.append("Missing header element with class='header'")
+        elif not re.search(r'<h1[^>]*class="name"[^>]*>', html):
+            issues.append("Missing name (h1 with class='name') in header")
 
     # Must have at least one section
     if not re.search(r'<section[^>]*class="section"', html):
@@ -93,7 +94,10 @@ class DataValidator(BaseFilter):
     ) -> FilterResult:
         # Choose validation based on which field is present
         if optimized.html is not None:
-            valid, issues = validate_html(optimized.html)
+            valid, issues = validate_html(
+                optimized.html,
+                require_header=source.contact_info is None,
+            )
         elif optimized.data is not None:
             valid, issues = validate_resume_data(optimized)
         else:

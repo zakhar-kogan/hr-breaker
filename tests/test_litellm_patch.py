@@ -131,3 +131,17 @@ class TestPatchedMapMessages:
         assert msg["role"] == "assistant"
         assert len(msg["tool_calls"]) == 1
         assert msg["tool_calls"][0]["function"]["name"] == "check_length"
+
+
+    @pytest.mark.asyncio
+    async def test_system_messages_are_hoisted_before_user_messages(self):
+        messages = [
+            ModelRequest(parts=[UserPromptPart(content="Hello first")]),
+            ModelRequest(parts=[SystemPromptPart(content="Late system")]),
+        ]
+
+        result = await _patched_map_messages(None, messages)
+        assert result == [
+            {"role": "system", "content": "Late system"},
+            {"role": "user", "content": "Hello first"},
+        ]

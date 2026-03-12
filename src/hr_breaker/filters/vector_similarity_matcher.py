@@ -1,6 +1,6 @@
 from litellm import aembedding as litellm_aembedding
 
-from hr_breaker.config import get_settings
+from hr_breaker.config import get_embedding_dimensions, get_embedding_request_kwargs, get_settings
 from hr_breaker.filters.base import BaseFilter
 from hr_breaker.filters.registry import FilterRegistry
 from hr_breaker.models import FilterResult, JobPosting, OptimizedResume, ResumeSource
@@ -26,8 +26,6 @@ class VectorSimilarityMatcher(BaseFilter):
         source: ResumeSource,
         language: Language | None = None,
     ) -> FilterResult:
-        settings = get_settings()
-
         if optimized.pdf_text is None:
             return FilterResult(
                 filter_name=self.name,
@@ -41,22 +39,31 @@ class VectorSimilarityMatcher(BaseFilter):
         resume_text = optimized.pdf_text
         job_text = f"{job.title} {job.description} {' '.join(job.requirements)}"
 
+        dimensions = get_embedding_dimensions()
+
         try:
-            result = await run_with_retry(
-                litellm_aembedding,
-                model=settings.embedding_model,
-                input=[resume_text, job_text],
-                dimensions=settings.embedding_output_dimensionality,
-            )
+            if dimensions is None:
+                result = await run_with_retry(
+                    litellm_aembedding,
+                    **get_embedding_request_kwargs(),
+                    input=[resume_text, job_text],
+                )
+            else:
+                result = await run_with_retry(
+                    litellm_aembedding,
+                    **get_embedding_request_kwargs(),
+                    input=[resume_text, job_text],
+                    dimensions=dimensions,
+                )
             embeddings = [item["embedding"] for item in result.data]
         except Exception as e:
             return FilterResult(
                 filter_name=self.name,
                 passed=True,
-                score=1.0,
+                score=0.5,
                 threshold=self.threshold,
-                issues=[f"Embedding API error: {e}"],
-                suggestions=[],
+                issues=[f"Embedding API unavailable, filter skipped: {e}"],
+                suggestions=["Check embedding API key and model configuration"],
             )
 
         # Cosine similarity

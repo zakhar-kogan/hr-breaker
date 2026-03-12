@@ -91,22 +91,13 @@ async def run_filters(
     filters = sorted(filters, key=lambda f: f.priority)
 
     for filter_cls in filters:
-        # Skip high-priority (last) filters if earlier ones failed
-        if (
-            filter_cls.priority >= 100
-            and results
-            and not all(r.passed for r in results)
-        ):
-            continue
-
         f = filter_cls(no_shame=no_shame)
         start = time.perf_counter()
         result = await f.evaluate(optimized, job, source, language=language)
         logger.debug(f"{filter_cls.name}: {time.perf_counter() - start:.2f}s")
         results.append(result)
 
-        # Early exit on failure (unless it's a final check)
-        if not result.passed and filter_cls.priority < 100:
+        if not result.passed:
             break
 
     return ValidationResult(results=results)
@@ -142,7 +133,7 @@ async def optimize_for_job(
     """
     settings = get_settings()
 
-    logger.info("Starting optimization with settings: %s", settings)
+    logger.debug("Starting optimization with settings: %s", settings)
 
     if max_iterations is None:
         max_iterations = settings.max_iterations
@@ -171,7 +162,10 @@ async def optimize_for_job(
         )
         with log_time("optimize_resume"):
             optimized = await optimize_resume(source, job, ctx, no_shame=no_shame, user_instructions=user_instructions, language=language)
-        logger.info(f"Optimizer changes: {optimized.changes}")
+        if optimized.changes:
+            logger.info("Optimizer changes:")
+            for change in optimized.changes:
+                logger.info("  - %s", change)
         # Store last attempt for feedback (html or data depending on mode)
         last_attempt = (
             optimized.html
@@ -180,7 +174,7 @@ async def optimize_for_job(
         )
 
         # Render PDF and extract text for filters (like real ATS)
-        optimized = _render_and_extract(optimized, renderer)
+        optimized = _render_and_extract(optimized, renderer, source)
 
         if optimized.pdf_text is None:
             # PDF rendering failed - treat as validation failure
@@ -211,13 +205,17 @@ async def optimize_for_job(
     return optimized, validation, job
 
 
-def _render_and_extract(optimized: OptimizedResume, renderer) -> OptimizedResume:
+def _render_and_extract(
+    optimized: OptimizedResume,
+    renderer,
+    source: ResumeSource,
+) -> OptimizedResume:
     """Render PDF and extract text, updating the OptimizedResume."""
     try:
         with log_time("render_pdf"):
             # Use html if available, otherwise fall back to data (legacy)
             if optimized.html is not None:
-                result = renderer.render(optimized.html)
+                result = renderer.render(optimized.html, contact_info=source.contact_info)
             elif optimized.data is not None:
                 result = renderer.render_data(optimized.data)
             else:

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, BinaryContent
 
 from hr_breaker.agents.combined_reviewer import pdf_to_image
-from hr_breaker.config import get_model_settings, get_pro_model, get_settings
+from hr_breaker.config import get_model_settings, get_pro_llm_config, get_pro_model, get_settings
 from hr_breaker.filters.data_validator import validate_html
 from hr_breaker.filters.keyword_matcher import check_keywords
 from hr_breaker.models import (
@@ -19,6 +19,7 @@ from hr_breaker.models.language import Language
 from hr_breaker.services.length_estimator import estimate_content_length
 from hr_breaker.services.renderer import HTMLRenderer, RenderError
 from hr_breaker.utils import extract_text_from_html
+from hr_breaker.runtime_status import emit_usage_event
 from hr_breaker.utils.retry import run_with_retry
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,9 @@ CONTENT RULES:
 - Add a summary section highlighting the most relevant experiences.
 - Try to preserve the original writing style if possible.
 - Avoid leaving an empty space at the bottom of the page if you have useful content to fill.
+- PROJECTS: Only include projects directly relevant to this job. Skip projects already listed under Publications. If no projects are relevant, omit the section entirely.
+- PUBLICATIONS: Always use "PUBLICATIONS" (plural) as the section title, even for a single item.
+- EDUCATION: By default include only the most recent / highest degree. Include multiple degrees only if they are both relevant to the role.
 
 {content_rules}
 
@@ -72,7 +76,21 @@ OPTIONAL TOOLS (use when helpful):
 LINKS:
 - Preserve contacts info as in the original and never delete it
 - Preserve URLs from the original resume (email, LinkedIn, GitHub, website, project links)
-- Use full URLs (include https://) for all links
+- Use full URLs (include https://) in the href attribute of every <a> tag
+- Link display text must NOT start with https:// or http:// — show just the domain+path (e.g. linkedin.com/in/username, github.com/username)
+
+PUBLICATIONS:
+- Always append the DOI in parentheses at the end if available, e.g. "Author et al., Title, Venue Year (DOI: 10.xxxx/xxxx)"
+
+PROFILE SOURCE (when input contains "## Contact" or "## Source documents ranked by relevance"):
+- The input is a MERGED PROFILE from multiple documents — it contains more content than one resume
+- "Candidate name:" field → use as the resume H1 name (first + last name)
+- "## Contact" → copy these fields ONLY into the header contact line (email, phone, LinkedIn, GitHub, website)
+- "## Additional links" → these are reference links for inline use in projects/publications, NOT for the header
+- "## Source documents ranked by relevance" → use to decide which experiences to highlight and trim
+- Be selective: include only the 3-5 most relevant experience entries for this specific job
+- Summary: 2-3 sentences maximum, tightly focused on this specific role
+- You MUST trim aggressively to fit one page — call check_content_length early and cut ruthlessly
 
 {resume_guide}
 """
@@ -87,7 +105,7 @@ ALLOWED:
 - You CAN use <style> tags if you need custom styling beyond the provided classes 
 
 STRICT RULES - NEVER VIOLATE:
-- Only add specific technologies, products, or platforms not in original (e.g. "Amazon Bedrock", "LangChain", "Pinecone") they can be justified (user has experience with PostgreSQL -> maybe they are familiar with MySQL too) and ONLY IF there is no other way to increase fit 
+- NEVER add specific named products or platforms absent from the original (e.g. "Amazon Bedrock", "LangChain", "Pinecone") unless they are a direct, obvious companion to something explicitly present (e.g. PostgreSQL user → may know MySQL) AND there is no other way to improve fit
 - NEVER fabricate job titles, companies, degrees, certifications, or achievements
 - NEVER invent metrics, numbers and achievements not in original
 - DO NOT drop work experience or achievements (publications, patents, awards, etc.) unless they decrease fit
@@ -121,6 +139,15 @@ class OptimizerResult(BaseModel):
     changes: list[str]
 
 
+STRUCTURED_HEADER_RULES = """
+STRUCTURED HEADER MODE:
+- The renderer injects the candidate name and contact line from structured data outside your HTML body.
+- Do NOT emit <header class=\"header\">, <h1 class=\"name\">, or any standalone contact line in the HTML body.
+- Start directly with the first content <section class=\"section\">.
+- Do not repeat email, phone, LinkedIn, GitHub, or website as a pseudo-header in the body unless they are genuinely part of section content.
+"""
+
+
 def get_optimizer_agent(
     job: JobPosting, source: ResumeSource, no_shame: bool = False
 ) -> Agent:
@@ -128,6 +155,8 @@ def get_optimizer_agent(
     settings = get_settings()
     resume_guide = _load_resume_guide()
     content_rules = OPTIMIZER_LENIENT_RULES if no_shame else OPTIMIZER_STRICT_RULES
+    if source.contact_info is not None:
+        resume_guide = f"{STRUCTURED_HEADER_RULES}\n\n{resume_guide}"
     system_prompt = OPTIMIZER_BASE.format(
         content_rules=content_rules, resume_guide=resume_guide
     )
@@ -150,7 +179,7 @@ def get_optimizer_agent(
         # Actually render PDF to check real page count
         try:
             renderer = HTMLRenderer()
-            render_result = renderer.render(html)
+            render_result = renderer.render(html, contact_info=source.contact_info)
             page_count = render_result.page_count
             fits_one_page = page_count == 1
         except RenderError as e:
@@ -195,7 +224,7 @@ def get_optimizer_agent(
         """Render HTML to PDF and return preview image. Use to visually check layout."""
         logger.debug("preview_resume called")
         renderer = HTMLRenderer()
-        result = renderer.render(html)
+        result = renderer.render(html, contact_info=source.contact_info)
         image_bytes, _ = pdf_to_image(result.pdf_bytes)
         return BinaryContent(data=image_bytes, media_type="image/png")
 
@@ -218,7 +247,7 @@ def get_optimizer_agent(
     @agent.tool_plain
     def validate_structure(html: str) -> dict:
         """Check HTML structure - headers, sections, no scripts."""
-        valid, issues = validate_html(html)
+        valid, issues = validate_html(html, require_header=source.contact_info is None)
         logger.debug(
             "validate_structure called: valid=%s, issues=%d", valid, len(issues)
         )
@@ -298,6 +327,14 @@ IMPORTANT: Make MINIMAL changes to fix ONLY the failed filters.
 - Preserve everything that already works
 """
 
+    if source.contact_info is not None:
+        prompt += f"""
+## Header Rendering:
+The PDF header is rendered separately from structured contact data for {source.contact_info.name}.
+Do NOT include a header element, H1 name block, or top-of-page contact line in your HTML.
+"""
+
+
     prompt += """
 Return JSON with:
 - html: The HTML body content (no wrapper tags, just the content for <body>)
@@ -308,6 +345,7 @@ Output ONLY valid JSON. The html field should contain the raw HTML string.
 
     agent = get_optimizer_agent(job, source, no_shame=no_shame)
     result = await run_with_retry(agent.run, prompt)
+    emit_usage_event("optimizer", result, model_name=get_pro_llm_config().model_name)
     return OptimizedResume(
         html=result.output.html,
         iteration=context.iteration,

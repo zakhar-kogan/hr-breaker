@@ -1,6 +1,13 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
-from hr_breaker.filters import HallucinationChecker, FilterRegistry, KeywordMatcher
+from hr_breaker.filters import (
+    FilterRegistry,
+    HallucinationChecker,
+    KeywordMatcher,
+    VectorSimilarityMatcher,
+ )
 from hr_breaker.models import JobPosting, OptimizedResume, ResumeSource
 
 
@@ -100,3 +107,53 @@ def test_filter_priorities_unique():
                 f"Duplicate priority {priority}: {seen[priority]} and {name}"
             )
         seen[priority] = name
+
+
+@pytest.mark.asyncio
+async def test_vector_similarity_matcher_uses_resolved_embedding_config(
+    source_resume, job_posting
+ ):
+    optimized = OptimizedResume(
+        html="<div>Test</div>",
+        source_checksum=source_resume.checksum,
+        pdf_text="Python Django PostgreSQL",
+    )
+    matcher = VectorSimilarityMatcher()
+    embedding_response = type(
+        "EmbeddingResponse",
+        (),
+        {
+            "data": [
+                {"embedding": [1.0, 0.0]},
+                {"embedding": [1.0, 0.0]},
+            ]
+        },
+    )()
+
+    with (
+        patch(
+            "hr_breaker.filters.vector_similarity_matcher.get_embedding_request_kwargs",
+            return_value={
+                "model": "openai/text-embedding-3-small",
+                "api_key": "embed-key",
+                "api_base": "https://compat.example/v1",
+            },
+        ) as mock_kwargs,
+        patch(
+            "hr_breaker.filters.vector_similarity_matcher.run_with_retry",
+            new_callable=AsyncMock,
+            return_value=embedding_response,
+        ) as mock_retry,
+    ):
+        result = await matcher.evaluate(optimized, job_posting, source_resume)
+
+    assert result.passed
+    mock_kwargs.assert_called_once_with()
+    mock_retry.assert_awaited_once_with(
+        matcher.evaluate.__globals__["litellm_aembedding"],
+        model="openai/text-embedding-3-small",
+        api_key="embed-key",
+        api_base="https://compat.example/v1",
+        input=["Python Django PostgreSQL", "Backend Engineer  Python Django PostgreSQL"],
+        dimensions=768,
+    )
