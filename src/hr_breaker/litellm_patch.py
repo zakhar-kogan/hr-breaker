@@ -115,7 +115,14 @@ async def _patched_map_messages(
                 assistant_message["tool_calls"] = tool_calls
             litellm_messages.append(assistant_message)
 
-    return litellm_messages
+    # Merge all system parts into one message (some providers, e.g. Qwen, reject
+    # multiple system messages even when they appear at the start).
+    system_parts = [msg["content"] for msg in litellm_messages if msg.get("role") == "system"]
+    non_system_messages = [msg for msg in litellm_messages if msg.get("role") != "system"]
+    if system_parts:
+        merged_system = {"role": "system", "content": "\n\n".join(system_parts)}
+        return [merged_system, *non_system_messages]
+    return non_system_messages
 
 
 def apply():
