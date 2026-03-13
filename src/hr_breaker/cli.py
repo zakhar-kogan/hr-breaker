@@ -1,9 +1,12 @@
 """CLI interface for HR-Breaker."""
 
 import asyncio
+import threading
+import webbrowser
 from pathlib import Path
 
 import click
+import uvicorn
 
 from hr_breaker.agents import extract_name, parse_job_posting
 from hr_breaker.config import get_settings
@@ -12,8 +15,10 @@ from hr_breaker.models import (
     JobPosting,
     ResumeSource,
     SUPPORTED_LANGUAGES,
-    get_language,
+    get_language_safe,
+    resolve_target_language,
 )
+from hr_breaker.models.profile import document_needs_extraction, get_document_extraction
 from hr_breaker.orchestration import optimize_for_job
 from hr_breaker.services import (
     PDFStorage,
@@ -22,9 +27,12 @@ from hr_breaker.services import (
     CloudflareBlockedError,
 )
 from hr_breaker.services.pdf_storage import generate_run_id
-from hr_breaker.models.profile import document_needs_extraction, get_document_extraction
 from hr_breaker.services.pdf_parser import load_resume_content
 
+
+# ---------------------------------------------------------------------------
+# Helpers for extraction state display
+# ---------------------------------------------------------------------------
 
 def _format_extraction_state(doc) -> str:
     status = str(doc.metadata.get("extraction_status") or "").lower()
@@ -48,6 +56,10 @@ def _print_extraction_result(doc) -> str:
     click.echo(f" unexpected status: {status or 'missing'}")
     return "unexpected"
 
+
+# ---------------------------------------------------------------------------
+# CLI group
+# ---------------------------------------------------------------------------
 
 @click.group()
 def cli():
@@ -134,7 +146,7 @@ def profile_show(profile_id: str):
 @click.argument("profile_id")
 @click.argument("files", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--extract", is_flag=True, help="Run fact extraction immediately after adding")
-@click.option("--exclude", is_flag=True, help="Add as excluded by default (not used in optimization unless selected)")
+@click.option("--exclude", is_flag=True, help="Add as excluded by default")
 def profile_add(profile_id: str, files: tuple[Path, ...], extract: bool, exclude: bool):
     """Add one or more files to a profile.
 
@@ -184,7 +196,7 @@ def profile_add(profile_id: str, files: tuple[Path, ...], extract: bool, exclude
 
 
 # ---------------------------------------------------------------------------
-# optimize command (direct upload or profile mode)
+# optimize command
 # ---------------------------------------------------------------------------
 
 @cli.command()
@@ -229,10 +241,11 @@ def profile_add(profile_id: str, files: tuple[Path, ...], extract: bool, exclude
     "--lang",
     "-l",
     type=click.Choice(
-        [lang.code for lang in SUPPORTED_LANGUAGES], case_sensitive=False
+        ["from_job", "from_resume"] + [lang.code for lang in SUPPORTED_LANGUAGES],
+        case_sensitive=False,
     ),
     default=None,
-    help="Output language (default: en). Resume is generated directly in this language.",
+    help="Language mode: from_job (detect from job), from_resume (detect from resume), or ISO code.",
 )
 @click.option(
     "--instructions",
@@ -261,17 +274,16 @@ def optimize(
 ):
     """Optimize a resume for a job posting.
 
-    Direct upload mode (resume file + job):
+    Direct upload mode:
 
         hr-breaker optimize resume.txt https://example.com/job
 
-    Profile archive mode (profile-id + job; resume file omitted):
+    Profile archive mode:
 
         hr-breaker optimize --profile <id> https://example.com/job
 
     JOB_INPUT: URL or path to a file containing the job description.
     """
-    # Validate argument combinations
     if profile_id is None and resume_path is None:
         raise click.UsageError(
             "Provide either RESUME_PATH or --profile <id>.\n"
@@ -281,18 +293,15 @@ def optimize(
     if profile_id is not None and resume_path is not None:
         raise click.UsageError("Cannot use both RESUME_PATH and --profile at the same time.")
 
-    # In profile mode the positional JOB_INPUT shifts to resume_path slot when no --profile
-    # Handle: hr-breaker optimize --profile id <job_input>
+    # Handle: hr-breaker optimize --profile id <job>  (job ends up in resume_path slot)
     effective_job_input = job_input
     if profile_id is not None and job_input is None and resume_path is not None:
-        # User wrote: optimize --profile id <job>  (job ends up in resume_path)
         effective_job_input = str(resume_path)
         resume_path = None
 
     if effective_job_input is None:
         raise click.UsageError("JOB_INPUT is required (URL or path to job description).")
 
-    # Validate resume file exists if given
     if resume_path is not None and not resume_path.exists():
         raise click.ClickException(f"Resume file not found: {resume_path}")
 
@@ -326,44 +335,42 @@ def optimize(
                 click.echo("    Debug: no PDF (render failed)")
 
     settings = get_settings()
-    lang_code = lang or settings.default_language
-    target_language = get_language(lang_code) if lang_code != "en" else None
+    lang_mode = lang or settings.default_language
 
-    # Run all async work in single event loop
     async def run_optimization():
         nonlocal debug_dir
 
-        # --- Build source ---
         pre_parsed_job = None
         if profile_id is not None:
             source, pre_parsed_job = await _build_profile_source(profile_id, job_text, docs_filter=docs)
             first_name = source.first_name
             last_name = source.last_name
+            resume_lang_code = source.language_code or "en"
             name_str = f"{first_name or ''} {last_name or ''}".strip()
             click.echo(f"Profile: {profile_id}" + (f"  ({name_str})" if name_str else ""))
         else:
             resume_content = load_resume_content(resume_path)
-            first_name, last_name = await extract_name(resume_content)
-            click.echo(f"Resume: {first_name or 'Unknown'} {last_name or ''}")
-            # TODO(next step): direct uploads still do not populate structured contact_info.
-            # Extract contact fields here and set ResumeSource.contact_info so CLI resumes use
-            # the deterministic renderer-owned header path too.
+            first_name, last_name, resume_lang_code = await extract_name(resume_content)
+            click.echo(f"Resume: {first_name or 'Unknown'} {last_name or ''} (lang: {resume_lang_code})")
             source = ResumeSource(
                 content=resume_content,
                 first_name=first_name,
                 last_name=last_name,
+                language_code=resume_lang_code,
             )
 
         job = pre_parsed_job or await parse_job_posting(job_text)
-        click.echo(f"Job: {job.title} at {job.company}")
+        click.echo(f"Job: {job.title} at {job.company} (lang: {job.language_code})")
+
+        target_language = resolve_target_language(lang_mode, job.language_code, resume_lang_code)
+        source_lang = get_language_safe(resume_lang_code)
 
         if debug:
             debug_dir = pdf_storage.generate_debug_dir(job.company, job.title, run_id=run_id)
 
         mode = "sequential" if seq else "parallel"
         shame_mode = " [no-shame]" if no_shame else ""
-        lang_label = f" [lang: {lang_code}]" if target_language else ""
-        click.echo(f"Optimizing (mode: {mode}{shame_mode}{lang_label})...")
+        click.echo(f"Optimizing (mode: {mode}{shame_mode}, target: {target_language.english_name})...")
 
         optimized, validation, _ = await optimize_for_job(
             source,
@@ -374,10 +381,14 @@ def optimize(
             no_shame=no_shame,
             user_instructions=instructions,
             language=target_language,
+            source_language=source_lang,
         )
-        return first_name, last_name, source, optimized, validation, job
+        return first_name, last_name, source, optimized, validation, job, target_language
 
-    first_name, last_name, source, optimized, validation, job = asyncio.run(run_optimization())
+    first_name, last_name, source, optimized, validation, job, target_language = asyncio.run(
+        run_optimization()
+    )
+    lang_code = target_language.code
 
     if not validation.passed:
         click.echo("Warning: Not all filters passed")
@@ -460,7 +471,7 @@ async def _build_profile_source(
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option("--profile", "-p", "profile_id", default=None, help="Profile ID to backfill (default: all profiles)")
+@click.option("--profile", "-p", "profile_id", default=None, help="Profile ID to backfill (default: all)")
 @click.option("--force", is_flag=True, help="Re-extract even if extraction already exists")
 def backfill(profile_id: str | None, force: bool):
     """Extract facts from profile documents that are missing extraction data."""
@@ -531,6 +542,24 @@ def list_history():
             f"[{exists}] {pdf.path.name} - {pdf.job_title} @ {pdf.company} "
             f"({pdf.timestamp.strftime('%Y-%m-%d %H:%M')})"
         )
+
+
+# ---------------------------------------------------------------------------
+# serve command
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("--port", "-p", type=int, default=8899, help="Port to serve on")
+@click.option("--open/--no-open", default=True, help="Auto-open browser")
+def serve(port: int, open: bool):
+    """Start the web UI server."""
+    url = f"http://localhost:{port}"
+    click.echo(f"Starting HR-Breaker at {url}")
+
+    if open:
+        threading.Timer(1.5, webbrowser.open, args=[url]).start()
+
+    uvicorn.run("hr_breaker.server:app", host="0.0.0.0", port=port, log_level="warning")
 
 
 # ---------------------------------------------------------------------------
