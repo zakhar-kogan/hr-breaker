@@ -140,6 +140,10 @@ async def test_vector_similarity_matcher_uses_resolved_embedding_config(
             },
         ) as mock_kwargs,
         patch(
+            "hr_breaker.filters.vector_similarity_matcher.get_embedding_dimensions",
+            return_value=768,
+        ),
+        patch(
             "hr_breaker.filters.vector_similarity_matcher.run_with_retry",
             new_callable=AsyncMock,
             return_value=embedding_response,
