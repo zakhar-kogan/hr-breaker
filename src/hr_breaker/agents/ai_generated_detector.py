@@ -4,10 +4,9 @@ from functools import lru_cache
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
-from hr_breaker.config import get_flash_llm_config, get_flash_model, get_model_settings
+from hr_breaker.config import get_flash_model, get_model_settings
 from hr_breaker.models import FilterResult, OptimizedResume
 from hr_breaker.models.language import Language
-from hr_breaker.runtime_status import emit_usage_event
 from hr_breaker.utils.retry import run_with_retry
 
 
@@ -120,7 +119,6 @@ This resume is written in {language.english_name}. This is intentional.
 
     agent = get_ai_generated_agent()
     result = await run_with_retry(agent.run, prompt)
-    emit_usage_event("ai_generated_detector", result, model_name=get_flash_llm_config().model_name)
     r = result.output
 
     issues = []

@@ -2,9 +2,8 @@ from functools import lru_cache
 
 from pydantic_ai import Agent
 
-from hr_breaker.config import get_flash_llm_config, get_flash_model, get_model_settings
+from hr_breaker.config import get_flash_model, get_model_settings
 from hr_breaker.models import JobPosting
-from hr_breaker.runtime_status import emit_usage_event
 from hr_breaker.utils.retry import run_with_retry
 
 SYSTEM_PROMPT = """You are a job posting parser. Extract structured information from job postings.
@@ -14,6 +13,7 @@ Extract:
 - company: Company name
 - requirements: List of specific requirements (skills, experience, education)
 - keywords: Technical keywords, tools, technologies mentioned
+- language_code: ISO 639-1 code of the job posting's language (e.g. "en", "ru")
 - description: Brief summary of the role
 
 Be thorough in extracting keywords - include all technologies, tools, frameworks, methodologies mentioned.
@@ -33,7 +33,6 @@ async def parse_job_posting(text: str) -> JobPosting:
     """Parse job posting text into structured data."""
     agent = get_job_parser_agent()
     result = await run_with_retry(agent.run, f"Parse this job posting:\n\n{text}")
-    emit_usage_event("job_parser", result, model_name=get_flash_llm_config().model_name)
     job = result.output
     job.raw_text = text
     return job

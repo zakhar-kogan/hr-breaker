@@ -4,7 +4,7 @@ import logging
 from pydantic import BaseModel
 from pydantic_ai import Agent
 
-from hr_breaker.config import get_flash_llm_config, get_flash_model, get_model_settings
+from hr_breaker.config import get_flash_model, get_model_settings
 from hr_breaker.models.profile import (
     DocumentExtraction,
     EducationEntry,
@@ -13,7 +13,6 @@ from hr_breaker.models.profile import (
     ProjectEntry,
     SkillsEntry,
 )
-from hr_breaker.runtime_status import emit_usage_event
 from hr_breaker.utils.retry import run_with_retry
 
 logger = logging.getLogger(__name__)
@@ -105,7 +104,7 @@ def _strip_hallucinated_urls(info: PersonalInfo, source_text: str) -> PersonalIn
 async def _run_category(agent: Agent, doc_text: str, label: str):
     try:
         result = await run_with_retry(agent.run, doc_text)
-        emit_usage_event(f"extractor/{label}", result, model_name=get_flash_llm_config().model_name)
+
         return result.output
     except Exception as exc:
         logger.warning("Extraction category '%s' failed: %s", label, exc)
