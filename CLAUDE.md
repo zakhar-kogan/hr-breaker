@@ -18,13 +18,14 @@ Tool for optimizing resumes for job postings and passing automated filters.
 
 ## Architecture
 
-1. Streamlit frontend
+1. FastAPI + Alpine.js SPA frontend (Server-Sent Events for real-time progress)
 2. Pydantic-AI LLM agent framework + pydantic-ai-litellm (any LLM provider)
 3. Default: Google Gemini models (configurable to OpenAI, Anthropic, etc. via litellm)
 4. Modular filter system - easy to add new checks
 5. Resume caching - input once, apply to many jobs
+6. Profile archive system - upload documents, extract facts, synthesize resume source
 
-Python: 3.10–3.13 (3.14+ breaks asyncio in streamlit thread pools)
+Python: 3.10–3.13
 Package manager: uv
 Always use venv: `source .venv/bin/activate`
 Unit-tests: pytest
@@ -47,15 +48,20 @@ FLASH_MODEL=gemini/gemini-2.5-flash
 ### Structure
 ```
 src/hr_breaker/
-├── models/          # Pydantic data models
+├── models/          # Pydantic data models (including profile models)
 ├── agents/          # Pydantic-AI agents
 ├── filters/         # Plugin-based filter system
-├── services/        # Rendering, scraping, caching
+├── services/        # Rendering, scraping, caching, profile store
+│   ├── retrieval/   # Profile document ranking + synthesis
 │   └── scrapers/    # Job scraper implementations
+├── static/          # Web UI (Alpine.js SPA, served by FastAPI)
+│   ├── index.html
+│   ├── css/style.css
+│   └── js/app.js
 ├── utils/           # Helpers (retry with backoff, HTML text extraction)
 ├── orchestration.py # Core optimization loop
-├── main.py          # Streamlit UI
-├── cli.py           # Click CLI
+├── server.py        # FastAPI server (web UI + API)
+├── cli.py           # Click CLI (optimize, serve, list, profile, backfill)
 ├── config.py        # Settings (pydantic-settings BaseSettings, auto-reads env vars)
 └── litellm_patch.py # Monkey-patch for pydantic-ai-litellm vision support
 ```
@@ -96,19 +102,28 @@ To add filter: subclass `BaseFilter`, set `name` and `priority`, use `@FilterReg
 ### Commands
 ```bash
 # Web UI
-uv run streamlit run src/hr_breaker/main.py
+uv run hr-breaker serve                                       # starts FastAPI server on port 8899
 
 # CLI
 uv run hr-breaker optimize resume.txt https://example.com/job
-uv run hr-breaker optimize resume.txt https://example.com/job -l ru # generate directly in Russian
+uv run hr-breaker optimize resume.txt https://example.com/job -l ru      # target Russian
+uv run hr-breaker optimize resume.txt https://example.com/job -l from_job  # detect from job (default)
 uv run hr-breaker optimize resume.txt job.txt -D              # disable debug mode (on by default)
 uv run hr-breaker optimize resume.txt job.txt --seq           # sequential filters (early exit)
-uv run hr-breaker optimize resume.txt job.txt --no-shame      # massively relax lies/hallucination/AI checks (use with caution!)
-uv run hr-breaker optimize resume.txt job.txt --instructions "Focus on Python, add K8s cert"  # user instructions
+uv run hr-breaker optimize resume.txt job.txt --no-shame      # massively relax checks (use with caution!)
+uv run hr-breaker optimize resume.txt job.txt --instructions "Focus on Python, add K8s cert"
 uv run hr-breaker list                                        # list generated PDFs
 
+# Profile archive
+uv run hr-breaker profile list
+uv run hr-breaker profile create "John Doe"
+uv run hr-breaker profile add <profile-id> resume.pdf paper.pdf
+uv run hr-breaker profile show <profile-id>
+uv run hr-breaker optimize --profile <profile-id> https://example.com/job
+uv run hr-breaker backfill                                    # extract facts from all profiles
+
 # Tests
-uv run pytest tests/
+.venv/bin/python -m pytest tests/
 ```
 
 ### Output
