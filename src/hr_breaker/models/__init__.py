@@ -1,7 +1,7 @@
 from .feedback import FilterResult, ValidationResult, GeneratedPDF
 from .iteration import IterationContext
 from .job_posting import JobPosting
-from .language import Language, SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE, get_language
+from .language import Language, SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE, get_language, get_language_safe, LANGUAGE_MODES, resolve_target_language
 from .profile import (
     Profile,
     ProfileDocument,
@@ -41,6 +41,9 @@ __all__ = [
     "SUPPORTED_LANGUAGES",
     "DEFAULT_LANGUAGE",
     "get_language",
+    "get_language_safe",
+    "LANGUAGE_MODES",
+    "resolve_target_language",
     "Profile",
     "ProfileDocument",
     "RankedProfileDocument",

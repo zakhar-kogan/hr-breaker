@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, model_validator
 
-from hr_breaker.models.resume_data import ContactInfo, ResumeData
+from hr_breaker.models.resume_data import ResumeData
 
 
 class ResumeSource(BaseModel):
@@ -15,7 +15,8 @@ class ResumeSource(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     first_name: str | None = None
     last_name: str | None = None
-    contact_info: ContactInfo | None = None
+    language_code: str = "en"
+    filename: str | None = None  # Original upload filename
     instructions: str | None = None
 
     @model_validator(mode="before")
@@ -27,6 +28,10 @@ class ResumeSource(BaseModel):
                 data["content"] = data.pop("latex")
             if "notes" in data and "instructions" not in data:
                 data["instructions"] = data.pop("notes")
+            if "language_code" not in data:
+                data["language_code"] = "en"
+            # Drop removed field from old cache files
+            data.pop("contact_info", None)
         return data
 
     # Legacy alias for backward compatibility
