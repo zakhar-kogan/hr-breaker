@@ -1,16 +1,13 @@
 """Abstract renderer interface and implementations."""
 
-import html
 import os
-import re
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
-from urllib.parse import urlparse
 
 from jinja2 import Environment, FileSystemLoader
 
-from hr_breaker.models.resume_data import ContactInfo, ResumeData, RenderResult
+from hr_breaker.models.resume_data import ResumeData, RenderResult
 
 # Template directory
 TEMPLATE_DIR = Path(__file__).parent.parent.parent.parent / "templates"
@@ -38,90 +35,6 @@ def _setup_macos_library_path():
             return
 
 
-def _canonical_profile_url(raw: str, *, domain: str, path_prefix: str = "") -> str:
-    value = raw.strip()
-    if not value:
-        return value
-    if value.startswith("http://") or value.startswith("https://"):
-        return value
-
-    normalized = value.lstrip("@/")
-    if normalized.lower().startswith(f"{domain}/"):
-        return f"https://{normalized}"
-    if normalized.lower().startswith(domain):
-        return f"https://{normalized}"
-    return f"https://{domain}/{path_prefix}{normalized}"
-
-
-def _canonical_website_url(raw: str) -> str:
-    value = raw.strip()
-    if not value:
-        return value
-    if value.startswith(("http://", "https://", "mailto:", "tel:")):
-        return value
-    return f"https://{value}"
-
-
-def _display_url(raw: str) -> str:
-    value = raw.strip()
-    if not value:
-        return value
-    if value.startswith(("mailto:", "tel:")):
-        return value.split(":", 1)[1]
-    if not value.startswith(("http://", "https://")):
-        value = f"https://{value}"
-    parsed = urlparse(value)
-    display = parsed.netloc + parsed.path
-    if parsed.query:
-        display += f"?{parsed.query}"
-    return display.rstrip("/")
-
-
-def _render_contact_link(href: str, label: str) -> str:
-    return f'<a href="{html.escape(href, quote=True)}">{html.escape(label)}</a>'
-
-
-def _render_header_html(contact_info: ContactInfo | None) -> str:
-    if contact_info is None or not contact_info.name:
-        return ""
-
-    contact_parts: list[str] = []
-    if contact_info.email:
-        contact_parts.append(_render_contact_link(f"mailto:{contact_info.email}", contact_info.email))
-    if contact_info.phone:
-        contact_parts.append(html.escape(contact_info.phone))
-    if contact_info.location:
-        contact_parts.append(html.escape(contact_info.location))
-    if contact_info.linkedin:
-        href = _canonical_profile_url(contact_info.linkedin, domain="linkedin.com", path_prefix="in/")
-        contact_parts.append(_render_contact_link(href, _display_url(href)))
-    if contact_info.github:
-        href = _canonical_profile_url(contact_info.github, domain="github.com")
-        contact_parts.append(_render_contact_link(href, _display_url(href)))
-    if contact_info.website:
-        href = _canonical_website_url(contact_info.website)
-        contact_parts.append(_render_contact_link(href, _display_url(href)))
-
-    contact_line = '<span class="sep">|</span>'.join(contact_parts)
-    return (
-        '<header class="header">'
-        f'<h1 class="name">{html.escape(contact_info.name)}</h1>'
-        f'<div class="contact-line">{contact_line}</div>'
-        '</header>'
-    )
-
-
-def _strip_generated_header(html_body: str) -> str:
-    """Remove an LLM-generated header when the renderer injects the canonical one."""
-    return re.sub(
-        r"^\s*<header[^>]*class=[\"\'][^\"\']*header[^\"\']*[\"\'][^>]*>.*?</header>\s*",
-        "",
-        html_body,
-        count=1,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-
 class RenderError(Exception):
     """Raised when rendering fails."""
 
@@ -132,7 +45,7 @@ class BaseRenderer(ABC):
     """Abstract base class for resume renderers."""
 
     @abstractmethod
-    def render(self, html_body: str, contact_info: ContactInfo | None = None) -> RenderResult:
+    def render(self, html_body: str) -> RenderResult:
         """Render resume HTML body to PDF."""
         pass
 
@@ -193,25 +106,18 @@ class HTMLRenderer(BaseRenderer):
                 raise RenderError(msg) from e
             raise
 
-    def render(self, html_body: str, contact_info: ContactInfo | None = None) -> RenderResult:
-        """Render LLM-generated HTML body to PDF.
-
-        Args:
-            html_body: HTML content for the <body> (no wrapper needed)
-            contact_info: Optional structured contact data for deterministic header rendering
-        """
+    def render(self, html_body: str) -> RenderResult:
+        """Render LLM-generated HTML body to PDF."""
         from weasyprint import HTML
 
-        body_html = _strip_generated_header(html_body) if contact_info else html_body
-        header_html = _render_header_html(contact_info)
         html_content = (
             self._wrapper_html
-            .replace("{{HEADER}}", header_html)
-            .replace("{{BODY}}", body_html)
+            .replace("{{HEADER}}", "")
+            .replace("{{BODY}}", html_body)
         )
 
-        html = HTML(string=html_content, base_url=str(TEMPLATE_DIR))
-        doc = html.render(font_config=self.font_config)
+        html_doc = HTML(string=html_content, base_url=str(TEMPLATE_DIR))
+        doc = html_doc.render(font_config=self.font_config)
         pdf_bytes = doc.write_pdf()
         page_count = len(doc.pages)
 
@@ -232,13 +138,13 @@ class HTMLRenderer(BaseRenderer):
         template = self.env.get_template("resume.html")
         html_content = template.render(resume=data)
 
-        html = HTML(string=html_content, base_url=str(TEMPLATE_DIR))
+        html_doc = HTML(string=html_content, base_url=str(TEMPLATE_DIR))
         css_path = TEMPLATE_DIR / "resume.css"
         stylesheets = []
         if css_path.exists():
             stylesheets.append(CSS(filename=str(css_path), font_config=self.font_config))
 
-        doc = html.render(stylesheets=stylesheets, font_config=self.font_config)
+        doc = html_doc.render(stylesheets=stylesheets, font_config=self.font_config)
         pdf_bytes = doc.write_pdf()
         page_count = len(doc.pages)
 

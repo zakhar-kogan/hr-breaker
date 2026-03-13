@@ -1,12 +1,10 @@
-"""Background extraction worker — module-level singleton, survives Streamlit reruns."""
+"""Background extraction worker — module-level singleton."""
 import asyncio
 import logging
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
-
-from hr_breaker.runtime_status import RuntimeEvent, runtime_event_sink
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +16,7 @@ class ExtractionWorker:
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="extractor")
         self._status: dict[str, DocStatus] = {}
         self._lock = threading.Lock()
-        self.event_queue: queue.Queue[RuntimeEvent] = queue.Queue()
+        self.log_queue: queue.Queue[dict] = queue.Queue()
 
     def submit(self, profile_id: str, doc_ids: list[str]) -> None:
         """Queue documents for background extraction. Already-active jobs are skipped."""
@@ -36,12 +34,12 @@ class ExtractionWorker:
         with self._lock:
             return any(s in ("pending", "running") for s in self._status.values())
 
-    def drain_events(self) -> list[RuntimeEvent]:
-        """Return and clear all queued RuntimeEvents (includes usage with token counts)."""
+    def drain_logs(self) -> list[dict]:
+        """Return and clear all queued log messages."""
         events = []
         while True:
             try:
-                events.append(self.event_queue.get_nowait())
+                events.append(self.log_queue.get_nowait())
             except queue.Empty:
                 break
         return events
@@ -55,13 +53,12 @@ class ExtractionWorker:
 
         with self._lock:
             self._status[doc_id] = "running"
-        self.event_queue.put(RuntimeEvent(kind="info", message=f"Extracting: {label}"))
+        self.log_queue.put({"level": "INFO", "message": f"Extracting: {label}"})
 
         try:
             loop = asyncio.new_event_loop()
             try:
-                with runtime_event_sink(self.event_queue.put):
-                    loop.run_until_complete(store.extract_document_content(profile_id, doc_id))
+                loop.run_until_complete(store.extract_document_content(profile_id, doc_id))
             finally:
                 loop.close()
             # Warn when the LLM returned an empty extraction so the user knows
@@ -71,16 +68,16 @@ class ExtractionWorker:
                 status = str(updated_doc.metadata.get("extraction_status") or "").lower()
                 if status == "empty":
                     logger.warning("Extraction for '%s' produced no usable content", label)
-                    self.event_queue.put(RuntimeEvent(kind="warning", message=f"Extraction empty (no content found): {label}"))
+                    self.log_queue.put({"level": "WARNING", "message": f"Extraction empty (no content found): {label}"})
             with self._lock:
                 self._status[doc_id] = "done"
-            self.event_queue.put(RuntimeEvent(kind="info", message=f"Extracted: {label}"))
+            self.log_queue.put({"level": "INFO", "message": f"Extracted: {label}"})
         except Exception as exc:
             with self._lock:
                 self._status[doc_id] = "error"
-            self.event_queue.put(RuntimeEvent(kind="error", message=f"Extraction failed ({label}): {exc}"))
+            self.log_queue.put({"level": "ERROR", "message": f"Extraction failed ({label}): {exc}"})
             logger.error("Extraction failed for '%s': %s", label, exc)
 
 
-# Module-level singleton — shared across all Streamlit reruns
+# Module-level singleton
 extraction_worker = ExtractionWorker()

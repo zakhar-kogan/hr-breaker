@@ -17,7 +17,6 @@ from hr_breaker.models.profile import (
     document_needs_extraction,
     )
 from hr_breaker.models.resume import ResumeSource
-from hr_breaker.models.resume_data import ContactInfo
 
 _MAX_MERGED_SUMMARIES = 2
 
@@ -389,7 +388,6 @@ def synthesize_from_extractions(
         content=f"{header}\n\n{body}".strip(),
         first_name=first_name,
         last_name=last_name,
-        contact_info=build_contact_info(merged.personal_info, name=best_name or merged.personal_info.name),
         instructions=profile.instructions,
     )
 
@@ -429,11 +427,9 @@ def synthesize_from_whole_docs(
         body += f"\n\nNote: omitted (over budget): {', '.join(skipped)}"
 
     first_name, last_name, best_name = resolve_profile_name_parts(profile, extracted_name=None)
-    contact_info = build_contact_info(PersonalInfo(), name=best_name) if best_name else None
     return ResumeSource(
         content=f"{header}\n\n{body}".strip(),
         first_name=first_name,
         last_name=last_name,
-        contact_info=contact_info,
         instructions=profile.instructions,
     )

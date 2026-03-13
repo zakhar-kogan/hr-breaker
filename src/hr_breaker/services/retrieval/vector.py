@@ -2,15 +2,12 @@
 
 import hashlib
 import logging
+import os
 import threading
 
 from litellm import aembedding as litellm_aembedding
 
-from hr_breaker.config import (
-    get_embedding_dimensions,
-    get_embedding_llm_config,
-    get_embedding_request_kwargs,
-)
+from hr_breaker.config import get_settings
 from hr_breaker.models.profile import ProfileDocument
 from hr_breaker.utils.retry import run_with_retry
 
@@ -34,6 +31,24 @@ def _normalize_text(value: str) -> str:
     return " ".join(value.split())
 
 
+def _has_embedding_api_key() -> bool:
+    """Check if any embedding API key is configured."""
+    settings = get_settings()
+    model = settings.embedding_model
+    if model.startswith("openrouter/"):
+        return bool(os.environ.get("OPENROUTER_API_KEY"))
+    if model.startswith("gemini/") or "gemini" in model:
+        return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    if model.startswith("openai/"):
+        return bool(os.environ.get("OPENAI_API_KEY"))
+    # Default: assume key is set if any common key is present
+    return bool(
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+    )
+
+
 async def vector_scores(job_text: str, documents: list[ProfileDocument]) -> list[float | None]:
     """Return embedding cosine similarity of each document against job_text.
 
@@ -42,15 +57,15 @@ async def vector_scores(job_text: str, documents: list[ProfileDocument]) -> list
     """
     if not documents:
         return []
-    if not get_embedding_llm_config().api_key:
+    if not _has_embedding_api_key():
         return [None for _ in documents]
 
+    settings = get_settings()
     truncated = [_normalize_text(doc.content_text)[:4000] for doc in documents]
     for doc, text in zip(documents, truncated):
         if len(_normalize_text(doc.content_text)) > 4000:
             logger.debug("Truncating document '%s' for embedding", doc.title)
 
-    dimensions = get_embedding_dimensions()
     to_embed_indices: list[int] = []
     to_embed_texts: list[str] = []
     cached_embeddings: dict[int, list[float]] = {}
@@ -66,22 +81,19 @@ async def vector_scores(job_text: str, documents: list[ProfileDocument]) -> list
             to_embed_texts.append(text)
 
     fresh_embeddings: dict[int, list[float]] = {}
+    embed_kwargs = {
+        "model": settings.embedding_model,
+        "dimensions": settings.embedding_output_dimensionality,
+    }
+
     if to_embed_texts:
         payload = [job_text, *to_embed_texts]
         try:
-            if dimensions is None:
-                result = await run_with_retry(
-                    litellm_aembedding,
-                    **get_embedding_request_kwargs(),
-                    input=payload,
-                )
-            else:
-                result = await run_with_retry(
-                    litellm_aembedding,
-                    **get_embedding_request_kwargs(),
-                    input=payload,
-                    dimensions=dimensions,
-                )
+            result = await run_with_retry(
+                litellm_aembedding,
+                **embed_kwargs,
+                input=payload,
+            )
         except Exception as exc:
             logger.warning("Profile retrieval embedding failed: %s", exc)
             return [None for _ in documents]
@@ -96,21 +108,12 @@ async def vector_scores(job_text: str, documents: list[ProfileDocument]) -> list
             fresh_embeddings[doc_idx] = emb
     else:
         # All documents were cached; still need job embedding for similarity
-        payload = [job_text]
         try:
-            if dimensions is None:
-                result = await run_with_retry(
-                    litellm_aembedding,
-                    **get_embedding_request_kwargs(),
-                    input=payload,
-                )
-            else:
-                result = await run_with_retry(
-                    litellm_aembedding,
-                    **get_embedding_request_kwargs(),
-                    input=payload,
-                    dimensions=dimensions,
-                )
+            result = await run_with_retry(
+                litellm_aembedding,
+                **embed_kwargs,
+                input=[job_text],
+            )
         except Exception as exc:
             logger.warning("Profile retrieval embedding (job only) failed: %s", exc)
             return [None for _ in documents]
