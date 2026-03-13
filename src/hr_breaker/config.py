@@ -121,6 +121,11 @@ def get_settings() -> Settings:
     return Settings()
 
 
+def clear_settings_cache() -> None:
+    """Clear cached settings (for tests)."""
+    get_settings.cache_clear()
+
+
 def get_pro_model() -> LiteLLMModel:
     return LiteLLMModel(model_name=get_settings().pro_model)
 

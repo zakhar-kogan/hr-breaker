@@ -191,19 +191,6 @@ def merge_extractions(extractions: list[DocumentExtraction]) -> DocumentExtracti
     )
 
 
-def build_contact_info(personal_info: PersonalInfo, *, name: str | None) -> ContactInfo | None:
-    resolved_name = name or personal_info.name
-    if not resolved_name:
-        return None
-    return ContactInfo(
-        name=resolved_name,
-        email=personal_info.email,
-        phone=personal_info.phone,
-        linkedin=personal_info.linkedin,
-        github=personal_info.github,
-        website=personal_info.website,
-    )
-
 
 def format_extraction(
     extraction: DocumentExtraction,

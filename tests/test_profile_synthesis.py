@@ -89,8 +89,6 @@ def test_fallback_uses_last_name_without_duplication():
 
     assert source.first_name is None
     assert source.last_name == "Doe"
-    assert source.contact_info is not None
-    assert source.contact_info.name == "Doe"
 
 
 # --- Extraction path ---
@@ -114,7 +112,7 @@ def test_extraction_path_used_when_present():
     assert "Profile documents:" not in source.content
 
 
-def test_extraction_path_sets_structured_contact_info():
+def test_extraction_path_sets_contact_info_in_content():
     profile = _make_profile()
     ext = _extraction(
         personal_info=PersonalInfo(
@@ -129,11 +127,9 @@ def test_extraction_path_sets_structured_contact_info():
     doc = _make_doc(metadata={"extraction": ext.model_dump()})
     source = synthesize_profile_resume_source(profile, [doc], [_ranked(doc)])
 
-    assert source.contact_info is not None
-    assert source.contact_info.name == "Jane Doe"
-    assert source.contact_info.linkedin == "mock-candidate"
-    assert source.contact_info.github == "mock-candidate"
-    assert source.contact_info.website == "portfolio.example.test"
+    assert "Candidate name: Jane Doe" in source.content
+    assert "mock-candidate" in source.content
+    assert "portfolio.example.test" in source.content
 
 
 def test_extraction_path_uses_profile_display_name_for_missing_last_name():
@@ -147,8 +143,6 @@ def test_extraction_path_uses_profile_display_name_for_missing_last_name():
 
     assert source.first_name == "Mock"
     assert source.last_name == "Candidate"
-    assert source.contact_info is not None
-    assert source.contact_info.name == "Mock Candidate"
     assert "Candidate name: Mock Candidate" in source.content
 
 

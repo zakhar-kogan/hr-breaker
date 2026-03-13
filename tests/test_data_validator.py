@@ -70,14 +70,6 @@ def test_data_validator_threshold():
     assert validator.threshold == 1.0
 
 
-def test_validate_html_allows_missing_header_when_external():
-    valid, issues = validate_html(
-        '<section class="section"><h2 class="section-title">Summary</h2></section>',
-        require_header=False,
-    )
-    assert valid
-    assert issues == []
-
 
 # --- validate_resume_data Function Tests ---
 

@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -110,7 +110,7 @@ def test_filter_priorities_unique():
 
 
 @pytest.mark.asyncio
-async def test_vector_similarity_matcher_uses_resolved_embedding_config(
+async def test_vector_similarity_matcher_uses_settings_embedding_config(
     source_resume, job_posting
  ):
     optimized = OptimizedResume(
@@ -130,18 +130,15 @@ async def test_vector_similarity_matcher_uses_resolved_embedding_config(
         },
     )()
 
+    mock_settings = MagicMock()
+    mock_settings.embedding_model = "openai/text-embedding-3-small"
+    mock_settings.embedding_output_dimensionality = 768
+    mock_settings.filter_vector_threshold = 0.4
+
     with (
         patch(
-            "hr_breaker.filters.vector_similarity_matcher.get_embedding_request_kwargs",
-            return_value={
-                "model": "openai/text-embedding-3-small",
-                "api_key": "embed-key",
-                "api_base": "https://compat.example/v1",
-            },
-        ) as mock_kwargs,
-        patch(
-            "hr_breaker.filters.vector_similarity_matcher.get_embedding_dimensions",
-            return_value=768,
+            "hr_breaker.filters.vector_similarity_matcher.get_settings",
+            return_value=mock_settings,
         ),
         patch(
             "hr_breaker.filters.vector_similarity_matcher.run_with_retry",
@@ -152,12 +149,9 @@ async def test_vector_similarity_matcher_uses_resolved_embedding_config(
         result = await matcher.evaluate(optimized, job_posting, source_resume)
 
     assert result.passed
-    mock_kwargs.assert_called_once_with()
     mock_retry.assert_awaited_once_with(
         matcher.evaluate.__globals__["litellm_aembedding"],
         model="openai/text-embedding-3-small",
-        api_key="embed-key",
-        api_base="https://compat.example/v1",
         input=["Python Django PostgreSQL", "Backend Engineer  Python Django PostgreSQL"],
         dimensions=768,
     )

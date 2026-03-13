@@ -232,35 +232,6 @@ class TestHTMLRenderer:
         assert len(result.pdf_bytes) > 0
 
 
-    def test_render_injects_structured_header_links(self):
-        renderer = HTMLRenderer()
-        contact_info = ContactInfo(
-            name="Jane Smith",
-            email="jane@example.com",
-            phone="555-123-4567",
-            linkedin="janesmith",
-            github="janesmith",
-            website="janesmith.dev",
-        )
-        body_html = """
-        <section class=\"section\">
-            <h2 class=\"section-title\">Summary</h2>
-            <div class=\"section-content summary\">Distributed systems engineer.</div>
-        </section>
-        """
-        result = renderer.render(body_html, contact_info=contact_info)
-
-        doc = fitz.open(stream=result.pdf_bytes, filetype="pdf")
-        text = doc[0].get_text()
-        links = {link.get("uri") for link in doc[0].get_links() if link.get("uri")}
-
-        assert "JANE SMITH" in text
-        assert "linkedin.com/in/janesmith" in text
-        assert "github.com/janesmith" in text
-        assert "https://linkedin.com/in/janesmith" in links
-        assert "https://github.com/janesmith" in links
-        assert "https://janesmith.dev" in links
-
 
 # --- Integration Tests ---
 
