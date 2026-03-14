@@ -26,7 +26,7 @@ def setup_logging() -> logging.Logger:
 
     logging.basicConfig(
         level=getattr(logging, general_level, logging.WARNING),
-        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+        format="%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s - %(message)s",
         datefmt="%H:%M:%S",
     )
 
@@ -49,6 +49,22 @@ class Settings(BaseSettings):
     moonshot_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("MOONSHOT_API_KEY"),
+    )
+    openai_api_base: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENAI_API_BASE", "OPENAI_BASE_URL"),
+    )
+    pro_openai_api_base: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("PRO_OPENAI_API_BASE"),
+    )
+    flash_openai_api_base: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FLASH_OPENAI_API_BASE"),
+    )
+    embedding_openai_api_base: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EMBEDDING_OPENAI_API_BASE"),
     )
 
     pro_model: str = "gemini/gemini-3-pro-preview"
@@ -114,6 +130,14 @@ class Settings(BaseSettings):
             os.environ["GEMINI_API_KEY"] = self.gemini_api_key
         if self.moonshot_api_key and "MOONSHOT_API_KEY" not in os.environ:
             os.environ["MOONSHOT_API_KEY"] = self.moonshot_api_key
+        if self.openai_api_base and "OPENAI_API_BASE" not in os.environ:
+            os.environ["OPENAI_API_BASE"] = self.openai_api_base
+        if self.pro_openai_api_base and "PRO_OPENAI_API_BASE" not in os.environ:
+            os.environ["PRO_OPENAI_API_BASE"] = self.pro_openai_api_base
+        if self.flash_openai_api_base and "FLASH_OPENAI_API_BASE" not in os.environ:
+            os.environ["FLASH_OPENAI_API_BASE"] = self.flash_openai_api_base
+        if self.embedding_openai_api_base and "EMBEDDING_OPENAI_API_BASE" not in os.environ:
+            os.environ["EMBEDDING_OPENAI_API_BASE"] = self.embedding_openai_api_base
 
 
 @lru_cache
@@ -126,12 +150,63 @@ def clear_settings_cache() -> None:
     get_settings.cache_clear()
 
 
+def required_api_key_env_for_model(model_name: str) -> str | None:
+    if model_name.startswith("openrouter/"):
+        return "OPENROUTER_API_KEY"
+    if model_name.startswith("gemini/") or "gemini" in model_name:
+        return "GEMINI_API_KEY"
+    if model_name.startswith("openai/"):
+        return "OPENAI_API_KEY"
+    if model_name.startswith("anthropic/"):
+        return "ANTHROPIC_API_KEY"
+    if model_name.startswith("moonshot/"):
+        return "MOONSHOT_API_KEY"
+    return None
+
+
+def has_api_key_for_model(model_name: str) -> bool:
+    env_var = required_api_key_env_for_model(model_name)
+    if env_var == "GEMINI_API_KEY":
+        return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    if env_var is not None:
+        return bool(os.environ.get(env_var))
+    return bool(
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("MOONSHOT_API_KEY")
+    )
+
+
+def _litellm_api_base_for_model(scope: str, model_name: str) -> str | None:
+    settings = get_settings()
+    if not model_name.startswith("openai/"):
+        return None
+    scoped_field = {
+        "pro": "pro_openai_api_base",
+        "flash": "flash_openai_api_base",
+        "embedding": "embedding_openai_api_base",
+    }[scope]
+    return getattr(settings, scoped_field) or settings.openai_api_base
+
+
+def _litellm_model(scope: str, model_name: str) -> LiteLLMModel:
+    return LiteLLMModel(model_name=model_name, api_base=_litellm_api_base_for_model(scope, model_name))
+
+
 def get_pro_model() -> LiteLLMModel:
-    return LiteLLMModel(model_name=get_settings().pro_model)
+    return _litellm_model("pro", get_settings().pro_model)
 
 
 def get_flash_model() -> LiteLLMModel:
-    return LiteLLMModel(model_name=get_settings().flash_model)
+    return _litellm_model("flash", get_settings().flash_model)
+
+
+def get_embedding_api_base() -> str | None:
+    settings = get_settings()
+    return _litellm_api_base_for_model("embedding", settings.embedding_model)
 
 
 _FIELD_ENV_MAP = {
@@ -139,6 +214,10 @@ _FIELD_ENV_MAP = {
     "flash_model": "FLASH_MODEL",
     "embedding_model": "EMBEDDING_MODEL",
     "reasoning_effort": "REASONING_EFFORT",
+    "openai_api_base": "OPENAI_API_BASE",
+    "pro_openai_api_base": "PRO_OPENAI_API_BASE",
+    "flash_openai_api_base": "FLASH_OPENAI_API_BASE",
+    "embedding_openai_api_base": "EMBEDDING_OPENAI_API_BASE",
     "filter_hallucination_threshold": "FILTER_HALLUCINATION_THRESHOLD",
     "filter_keyword_threshold": "FILTER_KEYWORD_THRESHOLD",
     "filter_llm_threshold": "FILTER_LLM_THRESHOLD",

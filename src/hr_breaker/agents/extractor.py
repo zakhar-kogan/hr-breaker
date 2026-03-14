@@ -4,7 +4,13 @@ import logging
 from pydantic import BaseModel
 from pydantic_ai import Agent
 
-from hr_breaker.config import get_flash_model, get_model_settings
+from hr_breaker.config import (
+    get_flash_model,
+    get_model_settings,
+    get_settings,
+    has_api_key_for_model,
+    required_api_key_env_for_model,
+ )
 from hr_breaker.models.profile import (
     DocumentExtraction,
     EducationEntry,
@@ -100,6 +106,14 @@ def _strip_hallucinated_urls(info: PersonalInfo, source_text: str) -> PersonalIn
         return info.model_copy(update=updates)
     return info
 
+def _ensure_extraction_credentials(model_name: str) -> None:
+    required_env = required_api_key_env_for_model(model_name)
+    if required_env and not has_api_key_for_model(model_name):
+        raise RuntimeError(
+            f"Missing API key for extraction model '{model_name}'. Set {required_env} before running profile extraction."
+        )
+
+
 
 async def _run_category(agent: Agent, doc_text: str, label: str):
     try:
@@ -113,6 +127,8 @@ async def _run_category(agent: Agent, doc_text: str, label: str):
 
 async def extract_document(content_text: str) -> DocumentExtraction:
     """Extract structured facts via 6 parallel focused calls. Partial failures use empty defaults."""
+    model_name = get_settings().flash_model
+    _ensure_extraction_credentials(model_name)
     model = get_flash_model()
     settings = get_model_settings()
 

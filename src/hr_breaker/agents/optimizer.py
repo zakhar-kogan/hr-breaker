@@ -19,7 +19,7 @@ from hr_breaker.models.language import Language
 from hr_breaker.services.length_estimator import estimate_content_length
 from hr_breaker.services.renderer import HTMLRenderer, RenderError
 from hr_breaker.utils import extract_text_from_html
-from hr_breaker.utils.retry import run_with_retry
+from hr_breaker.utils.optimization_telemetry import run_tracked_agent
 
 logger = logging.getLogger(__name__)
 
@@ -324,7 +324,7 @@ Output ONLY valid JSON. The html field should contain the raw HTML string.
 """
 
     agent = get_optimizer_agent(job, source, no_shame=no_shame)
-    result = await run_with_retry(agent.run, prompt)
+    result = await run_tracked_agent(agent, prompt, component="Optimizer")
     return OptimizedResume(
         html=result.output.html,
         iteration=context.iteration,

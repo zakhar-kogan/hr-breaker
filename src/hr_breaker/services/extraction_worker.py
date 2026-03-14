@@ -18,13 +18,14 @@ class ExtractionWorker:
         self._lock = threading.Lock()
         self.log_queue: queue.Queue[dict] = queue.Queue()
 
-    def submit(self, profile_id: str, doc_ids: list[str]) -> None:
+    def submit(self, profile_id: str, doc_ids: list[str], overrides: dict | None = None) -> None:
         """Queue documents for background extraction. Already-active jobs are skipped."""
+        job_overrides = dict(overrides or {})
         with self._lock:
             for doc_id in doc_ids:
                 if self._status.get(doc_id) not in ("pending", "running"):
                     self._status[doc_id] = "pending"
-                    self._executor.submit(self._run, profile_id, doc_id)
+                    self._executor.submit(self._run, profile_id, doc_id, job_overrides)
 
     def get_status(self, doc_id: str) -> DocStatus | None:
         with self._lock:
@@ -44,7 +45,8 @@ class ExtractionWorker:
                 break
         return events
 
-    def _run(self, profile_id: str, doc_id: str) -> None:
+    def _run(self, profile_id: str, doc_id: str, overrides: dict | None = None) -> None:
+        from hr_breaker.config import settings_override
         from hr_breaker.services.profile_store import ProfileStore
 
         store = ProfileStore()
@@ -58,7 +60,8 @@ class ExtractionWorker:
         try:
             loop = asyncio.new_event_loop()
             try:
-                loop.run_until_complete(store.extract_document_content(profile_id, doc_id))
+                with settings_override(overrides):
+                    loop.run_until_complete(store.extract_document_content(profile_id, doc_id))
             finally:
                 loop.close()
             # Warn when the LLM returned an empty extraction so the user knows

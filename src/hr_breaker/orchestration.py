@@ -40,6 +40,24 @@ _ = (
 )
 
 
+def _provider_for_model(model_name: str) -> str:
+    return model_name.split("/", 1)[0] if "/" in model_name else "unknown"
+
+
+def _optimization_settings_summary_lines(settings, *, max_iterations: int, parallel: bool, no_shame: bool) -> list[str]:
+    return [
+        f"Pro model: {settings.pro_model} / {_provider_for_model(settings.pro_model)}",
+        f"Flash model: {settings.flash_model} / {_provider_for_model(settings.flash_model)}",
+        f"Embedding model: {settings.embedding_model} / {_provider_for_model(settings.embedding_model)}",
+        f"Optimization mode: {'parallel' if parallel else 'sequential'}, reasoning: {settings.reasoning_effort}, max iterations: {max_iterations}, no-shame: {no_shame}",
+    ]
+
+def _optimizer_changes_log_message(changes: list[str]) -> str:
+    if not changes:
+        return "Optimizer changes: none"
+    return "Optimizer changes:\n" + "\n".join(f"- {change}" for change in changes)
+
+
 @contextmanager
 def log_time(operation: str):
     start = time.perf_counter()
@@ -145,10 +163,16 @@ async def optimize_for_job(
     """
     settings = get_settings()
 
-    logger.info("Starting optimization with settings: %s", settings)
-
     if max_iterations is None:
         max_iterations = settings.max_iterations
+
+    for line in _optimization_settings_summary_lines(
+        settings,
+        max_iterations=max_iterations,
+        parallel=parallel,
+        no_shame=no_shame,
+    ):
+        logger.info(line)
 
     renderer = HTMLRenderer()
 
@@ -174,7 +198,7 @@ async def optimize_for_job(
         )
         with log_time("optimize_resume"):
             optimized = await optimize_resume(source, job, ctx, no_shame=no_shame, user_instructions=user_instructions, language=language)
-        logger.info(f"Optimizer changes: {optimized.changes}")
+        logger.info(_optimizer_changes_log_message(optimized.changes))
         # Store last attempt for feedback (html or data depending on mode)
         last_attempt = (
             optimized.html

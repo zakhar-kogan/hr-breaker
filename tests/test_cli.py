@@ -4,14 +4,14 @@ from unittest.mock import AsyncMock, patch
 from click.testing import CliRunner
 
 from hr_breaker.cli import cli
-from hr_breaker.config import clear_settings_cache
+import hr_breaker.config as config_module
 from hr_breaker.models.profile import DocumentExtraction
 from hr_breaker.services.profile_store import ProfileStore
 
 
 def test_profile_show_reports_empty_extraction(monkeypatch, tmp_path):
     monkeypatch.setenv("PROFILE_DIR", str(tmp_path / "profiles"))
-    clear_settings_cache()
+    config_module.clear_settings_cache()
     try:
         store = ProfileStore()
         profile = store.create_profile("Candidate")
@@ -29,12 +29,12 @@ def test_profile_show_reports_empty_extraction(monkeypatch, tmp_path):
         assert "empty extraction" in result.output
         assert "[note, extracted]" not in result.output
     finally:
-        clear_settings_cache()
+        config_module.clear_settings_cache()
 
 
 def test_backfill_reports_empty_extraction_separately(monkeypatch, tmp_path):
     monkeypatch.setenv("PROFILE_DIR", str(tmp_path / "profiles"))
-    clear_settings_cache()
+    config_module.clear_settings_cache()
     try:
         store = ProfileStore()
         profile = store.create_profile("Candidate")
@@ -50,4 +50,4 @@ def test_backfill_reports_empty_extraction_separately(monkeypatch, tmp_path):
         assert "Resume... empty" in result.output
         assert "Done: 0 extracted, 1 empty, 0 failed, 1 total" in result.output
     finally:
-        clear_settings_cache()
+        config_module.clear_settings_cache()
