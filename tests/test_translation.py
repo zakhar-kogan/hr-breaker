@@ -233,7 +233,9 @@ class TestPDFStorageLanguagePostfix:
 
 
 class TestTranslationConfig:
-    def test_default_language_setting(self):
-        from hr_breaker.config import Settings
+    def test_default_language_setting(self, monkeypatch):
+        monkeypatch.delenv("DEFAULT_LANGUAGE", raising=False)
+        from hr_breaker.config import Settings, get_settings
+        get_settings.cache_clear()
         s = Settings()
-        assert s.default_language == "en"
+        assert s.default_language == "from_job"
