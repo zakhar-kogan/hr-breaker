@@ -127,3 +127,27 @@ class TestSettingsOverride:
         assert second_done.is_set()
         assert entered == ["first", "second"]
         assert observed["value"] == "https://second.example.test/v1"
+
+
+def test_max_tokens_from_env(monkeypatch):
+    monkeypatch.delenv("MAX_OUTPUT_TOKENS", raising=False)
+    monkeypatch.setenv("MAX_TOKENS", "8192")
+    config_module.get_settings.cache_clear()
+
+    assert config_module.get_settings().max_tokens == 8192
+    assert config_module.get_model_settings() == {
+        "reasoning_effort": config_module.get_settings().reasoning_effort,
+        "max_tokens": 8192,
+    }
+
+    config_module.get_settings.cache_clear()
+
+
+def test_max_output_tokens_alias_from_env(monkeypatch):
+    monkeypatch.delenv("MAX_TOKENS", raising=False)
+    monkeypatch.setenv("MAX_OUTPUT_TOKENS", "4096")
+    config_module.get_settings.cache_clear()
+
+    assert config_module.get_settings().max_tokens == 4096
+
+    config_module.get_settings.cache_clear()
