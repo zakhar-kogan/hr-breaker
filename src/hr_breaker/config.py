@@ -104,6 +104,18 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("FLASH_ANTHROPIC_API_BASE"),
     )
+    llm_shared_provider: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_SHARED_PROVIDER"),
+    )
+    llm_shared_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_SHARED_API_KEY"),
+    )
+    llm_shared_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_SHARED_BASE_URL"),
+    )
 
     pro_model: str = "gemini/gemini-3-pro-preview"
     flash_model: str = "gemini/gemini-3-flash-preview"
@@ -187,6 +199,11 @@ class Settings(BaseSettings):
             os.environ["PRO_ANTHROPIC_API_BASE"] = self.pro_anthropic_api_base
         if self.flash_anthropic_api_base and "FLASH_ANTHROPIC_API_BASE" not in os.environ:
             os.environ["FLASH_ANTHROPIC_API_BASE"] = self.flash_anthropic_api_base
+        if self.llm_shared_provider == "openai_compatible":
+            if self.llm_shared_api_key and not os.environ.get("OPENAI_API_KEY"):
+                os.environ["OPENAI_API_KEY"] = sanitize_api_key(self.llm_shared_api_key, "openai")
+            if self.llm_shared_base_url and not os.environ.get("OPENAI_API_BASE"):
+                os.environ["OPENAI_API_BASE"] = self.llm_shared_base_url
 
 
 @lru_cache
@@ -276,7 +293,10 @@ def _litellm_api_base_for_model(scope: str, model_name: str) -> str | None:
         return None
     scoped_field, default_field = field_names
     settings = get_settings()
-    return getattr(settings, scoped_field) or getattr(settings, default_field)
+    api_base = getattr(settings, scoped_field) or getattr(settings, default_field)
+    if not api_base and provider == "openai" and settings.llm_shared_provider == "openai_compatible":
+        return settings.llm_shared_base_url
+    return api_base
 
 
 def _litellm_model(scope: str, model_name: str) -> LiteLLMModel:

@@ -96,6 +96,10 @@ document.addEventListener('alpine:init', () => {
             noteTitle: '',
             noteContent: '',
             addingNote: false,
+            editingNoteId: null,
+            editNoteTitle: '',
+            editNoteContent: '',
+            savingNote: false,
             _pollTimer: null,
         },
 
@@ -1172,6 +1176,7 @@ document.addEventListener('alpine:init', () => {
             this.profile.showDocCustomize = false;
             this.profile.extractionLogs = [];
             this.profile.error = null;
+            this.cancelEditProfileNote();
             await this._refreshProfileDocs(p.id);
             this._startExtractionPoll(p.id);
         },
@@ -1185,6 +1190,7 @@ document.addEventListener('alpine:init', () => {
             this.profile.showDocCustomize = false;
             this.profile.extractionLogs = [];
             this.profile.showNoteForm = false;
+            this.cancelEditProfileNote();
             this.profile.error = null;
         },
 
@@ -1227,6 +1233,8 @@ document.addEventListener('alpine:init', () => {
                 if (!resp.ok) return;
                 const data = await resp.json();
                 const documents = data.documents || [];
+                const extractingIds = new Set(data.extracting || []);
+                documents.forEach(d => { if (extractingIds.has(d.id)) d.extraction_status = "extracting"; });
                 this.profile.documents = documents;
                 if (this.profile.selectionCustomized) {
                     const currentIds = new Set(documents.map((doc) => doc.id));
@@ -1344,6 +1352,33 @@ document.addEventListener('alpine:init', () => {
             }
         },
 
+
+        failedExtractionDocIds() {
+            return (this.profile.documents || []).filter(
+                d => !d.extraction_status || d.extraction_status === "pending" || d.extraction_status === "error" || d.extraction_status === "empty"
+            ).map(d => d.id);
+        },
+
+        async reExtractFailed() {
+            const docIds = this.failedExtractionDocIds();
+            if (!this.profile.editingId || docIds.length === 0) return;
+            this.profile.error = null;
+            try {
+                const pid = this.profile.editingId;
+                const body = { ...this._profileRunOverrides(), doc_ids: docIds };
+                const resp = await fetch("/api/profile/" + pid + "/extract", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                });
+                const data = await resp.json();
+                if (!resp.ok) { this.profile.error = data.error || "Extract failed"; return; }
+                await this._refreshProfileDocs(pid);
+                this._startExtractionPoll(pid);
+            } catch (e) {
+                this.profile.error = "Extract failed: " + e.message;
+            }
+        },
         async addProfileNote() {
             if (!this.profile.editingId || !this.profile.noteTitle.trim()) return;
             this.profile.addingNote = true;
@@ -1368,6 +1403,49 @@ document.addEventListener('alpine:init', () => {
             } catch (e) {
                 this.profile.error = 'Failed to add note: ' + e.message;
                 this.profile.addingNote = false;
+            }
+        },
+
+        startEditProfileNote(doc) {
+            if (!doc || doc.kind !== 'note') return;
+            this.profile.showNoteForm = false;
+            this.profile.editingNoteId = doc.id;
+            this.profile.editNoteTitle = doc.title || '';
+            this.profile.editNoteContent = doc.content || '';
+            this.profile.error = null;
+        },
+
+        cancelEditProfileNote() {
+            this.profile.editingNoteId = null;
+            this.profile.editNoteTitle = '';
+            this.profile.editNoteContent = '';
+            this.profile.savingNote = false;
+        },
+
+        async saveProfileNote() {
+            if (!this.profile.editingId || !this.profile.editingNoteId || !this.profile.editNoteTitle.trim()) return;
+            this.profile.savingNote = true;
+            this.profile.error = null;
+            try {
+                const resp = await fetch('/api/profile/' + this.profile.editingId + '/note/' + this.profile.editingNoteId, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        title: this.profile.editNoteTitle.trim(),
+                        content: this.profile.editNoteContent.trim(),
+                    }),
+                });
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    try { const j = JSON.parse(text); throw new Error(j.detail || j.error || text); }
+                    catch (pe) { if (pe instanceof SyntaxError) throw new Error(text); throw pe; }
+                }
+                this.cancelEditProfileNote();
+                await this._refreshProfileDocs(this.profile.editingId);
+                this._startExtractionPoll(this.profile.editingId);
+            } catch (e) {
+                this.profile.error = 'Failed to save note: ' + e.message;
+                this.profile.savingNote = false;
             }
         },
 

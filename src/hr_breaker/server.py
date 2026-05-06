@@ -128,7 +128,7 @@ class CreateProfileRequest(BaseModel):
 
 
 class ProfileActionRequest(LLMOverrideRequest):
-    pass
+    doc_ids: list[str] | None = None
 
 
 class SynthesizeProfileRequest(ProfileActionRequest):
@@ -137,6 +137,11 @@ class SynthesizeProfileRequest(ProfileActionRequest):
 
 
 class AddNoteRequest(BaseModel):
+    title: str
+    content: str
+
+
+class UpdateNoteRequest(BaseModel):
     title: str
     content: str
 
@@ -489,6 +494,7 @@ async def get_profile(profile_id: str):
             "id": d.id,
             "title": d.title,
             "kind": d.kind,
+            "content": d.content_text if d.kind == "note" else None,
             "included_by_default": d.included_by_default,
             "extraction_status": d.metadata.get("extraction_status", "pending"),
         }
@@ -562,6 +568,29 @@ async def add_profile_note(profile_id: str, req: AddNoteRequest):
     return {"id": doc.id, "title": doc.title, "kind": doc.kind}
 
 
+@app.patch("/api/profile/{profile_id}/note/{doc_id}")
+async def update_profile_note(profile_id: str, doc_id: str, req: UpdateNoteRequest):
+    from hr_breaker.services.profile_store import ProfileStore
+    from hr_breaker.services.extraction_worker import extraction_worker
+    store = ProfileStore()
+    doc = store.get_document(profile_id, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.kind != "note":
+        raise HTTPException(status_code=400, detail="Only notes can be edited")
+    if not req.title.strip():
+        raise HTTPException(status_code=400, detail="Note title is required")
+
+    if req.title.strip() == doc.title and req.content.strip() == (doc.content_text or ""):
+        return {"id": doc.id, "title": doc.title, "kind": doc.kind, "content": doc.content_text}
+    extraction_worker.cancel([doc_id])
+    updated = store.update_note(profile_id, doc_id, title=req.title.strip(), content_text=req.content.strip())
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    extraction_worker.submit(profile_id, [updated.id])
+    return {"id": updated.id, "title": updated.title, "kind": updated.kind, "content": updated.content_text}
+
+
 @app.get("/api/profile/{profile_id}/extraction-status")
 async def profile_extraction_status(profile_id: str):
     from hr_breaker.services.profile_store import ProfileStore
@@ -589,7 +618,13 @@ async def re_extract_profile(profile_id: str, req: ProfileActionRequest | None =
     if not store.get_profile(profile_id):
         raise HTTPException(status_code=404, detail="Profile not found")
     documents = store.list_documents(profile_id)
-    doc_ids = [d.id for d in documents]
+    all_doc_ids = [d.id for d in documents]
+    requested = (req or ProfileActionRequest()).doc_ids
+    doc_ids = [did for did in requested if did in set(all_doc_ids)] if requested else all_doc_ids
+    if not doc_ids:
+        return JSONResponse(status_code=400, content={"error": "No matching documents to extract"})
+
+
     try:
         overrides = _build_overrides(req or ProfileActionRequest())
     except ValueError as exc:
